@@ -345,6 +345,22 @@ export function formatUsageSummary(usage: AccountUsage): string {
   return lines.join("\n").trimEnd();
 }
 
+/** Compact single-line status for footer bar display. */
+export function formatFooterStatus(usage: AccountUsage): string {
+  if (!usage.groups.length) return "Quota: n/a";
+  const parts: string[] = [];
+  for (const group of usage.groups) {
+    for (const bucket of group.buckets) {
+      const pct = remainingPercent(bucket.remainingFraction);
+      const reset = formatReset(bucket.resetTime);
+      // Shorten display name: take first word or abbreviation
+      const label = bucket.displayName.split(/\s+/)[0] || bucket.bucketId;
+      parts.push(`${label} ${pct ?? "?"}% (${reset})`);
+    }
+  }
+  return parts.join(" · ") || "Quota: n/a";
+}
+
 export function formatModelsList(usage: AccountUsage, opts?: { all?: boolean }): string {
   const lines: string[] = [];
   lines.push("Antigravity available models");

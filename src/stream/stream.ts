@@ -67,10 +67,6 @@ const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
 
 let toolCallCounter = 0;
 
-function hasFunctionResponse(part: GeminiPart): part is GeminiFunctionResponsePart {
-  return "functionResponse" in part;
-}
-
 function sanitizeToolCallId(id: string, fallbackName?: string): string {
   const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, "_");
   const capped = cleaned.slice(0, 64);
@@ -112,23 +108,20 @@ export function convertMessages(
   for (const msg of context.messages) {
     if (msg.role === "user") {
       const parts = asTextParts(msg.content);
-      if (parts.length) contents.push({ role: GeminiRole.User, parts });
+      if (parts.length) {
+        const last = contents[contents.length - 1];
+        if (last?.role === GeminiRole.User) {
+          last.parts.push(...parts);
+        } else {
+          contents.push({ role: GeminiRole.User, parts });
+        }
+      }
     } else if (msg.role === "assistant") {
       const parts: GeminiPart[] = [];
+      let sawToolCall = false;
       for (const block of msg.content) {
-        if (block.type === "text" && String(block.text || "").trim()) {
-          parts.push({ text: sanitizeText(block.text) });
-        } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
-          if (msg.provider === PROVIDER_ID && msg.model === model.id) {
-            parts.push({
-              thought: true,
-              text: sanitizeText(block.thinking),
-              ...(block.thinkingSignature ? { thoughtSignature: block.thinkingSignature } : {}),
-            });
-          } else {
-            parts.push({ text: sanitizeText(block.thinking) });
-          }
-        } else if (block.type === "toolCall") {
+        if (block.type === "toolCall") {
+          sawToolCall = true;
           parts.push({
             functionCall: {
               name: block.name,
@@ -139,6 +132,31 @@ export function convertMessages(
             },
             ...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
           });
+        } else if (sawToolCall) {
+          // Anthropic bridge rejects text/thinking blocks AFTER a tool_use block with
+          // 400 "assistant message prefill" (tool_use must be the last block of the
+          // assistant turn). Drop trailing text/thinking after any tool call.
+          continue;
+        } else if (block.type === "text" && String(block.text || "").trim()) {
+          parts.push({ text: sanitizeText(block.text) });
+        } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
+          const isAntigravityMsg =
+            !msg.provider ||
+            msg.provider === PROVIDER_ID ||
+            msg.provider === ANTIGRAVITY_API ||
+            String(msg.provider).startsWith("antigravity");
+          // Anthropic bridge requires thinking blocks to carry a signature; without one it
+          // rejects with "thinking.signature: Field required". Degrade to plain text.
+          const hasThinkingSignature = Boolean(block.thinkingSignature);
+          if (isAntigravityMsg && hasThinkingSignature) {
+            parts.push({
+              thought: true,
+              text: sanitizeText(block.thinking),
+              thoughtSignature: block.thinkingSignature,
+            });
+          } else {
+            parts.push({ text: sanitizeText(block.thinking) });
+          }
         }
       }
       const last = contents[contents.length - 1];
@@ -163,7 +181,7 @@ export function convertMessages(
         },
       };
       const last = contents[contents.length - 1];
-      if (last?.role === GeminiRole.User && last.parts.some(hasFunctionResponse)) {
+      if (last?.role === GeminiRole.User) {
         last.parts.push(part);
       } else {
         contents.push({ role: GeminiRole.User, parts: [part] });
@@ -179,10 +197,15 @@ export function convertMessages(
     contents.length > 0 &&
     (contents[contents.length - 1]?.role === GeminiRole.Model || lastMsg?.role === "assistant")
   ) {
-    contents.push({
-      role: GeminiRole.User,
-      parts: [{ text: "Please continue." }],
-    });
+    const last = contents[contents.length - 1];
+    if (last?.role === GeminiRole.User) {
+      last.parts.push({ text: "Please continue." });
+    } else {
+      contents.push({
+        role: GeminiRole.User,
+        parts: [{ text: "Please continue." }],
+      });
+    }
   }
 
   return contents;

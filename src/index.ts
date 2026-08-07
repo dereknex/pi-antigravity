@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth/index.js";
 import { DEFAULT_ENDPOINT } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
@@ -6,6 +6,7 @@ import { ANTIGRAVITY_MODELS, PROVIDER_ID, PROVIDER_NAME } from "./models/index.j
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
 import {
   fetchAccountUsage,
+  formatFooterStatus,
   formatModelsList,
   formatUsageSummary,
   resolveApiKeyFromContext,
@@ -36,6 +37,21 @@ async function withUsage(
   }
 }
 
+const STATUS_KEY = "antigravity.quota";
+
+/** Refresh quota and update footer status; swallows errors silently. */
+async function refreshFooterUsage(ctx: ExtensionContext): Promise<void> {
+  try {
+    const apiKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity").catch(() => undefined);
+    if (!apiKey) return;
+    const usage = await fetchAccountUsage(apiKey);
+    const text = formatFooterStatus(usage);
+    if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, text);
+  } catch {
+    // silent — footer is best-effort
+  }
+}
+
 export default function (pi: ExtensionAPI): void {
   pi.registerProvider(PROVIDER_ID, {
     name: PROVIDER_NAME,
@@ -51,6 +67,16 @@ export default function (pi: ExtensionAPI): void {
     streamSimple: streamAntigravity,
   });
 
+  // --- Footer usage display ---
+  pi.on("session_start", (_event, ctx) => {
+    void refreshFooterUsage(ctx);
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    void refreshFooterUsage(ctx);
+  });
+
+  // --- Commands ---
   pi.registerCommand("antigravity.usage", {
     description: "Show Antigravity shared quota pools (Gemini / Claude+GPT, 5h + weekly)",
     handler: async (_args, ctx) => {

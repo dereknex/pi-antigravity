@@ -220,7 +220,7 @@ const context = {
     {
       role: "assistant",
       content: [
-        { type: "thinking", thinking: "plan" },
+        { type: "thinking", thinking: "plan", thinkingSignature: "sig-1" },
         { type: "text", text: "hi" },
         { type: "toolCall", id: "call-1", name: "read", arguments: { path: "a.ts" } },
       ],
@@ -252,7 +252,11 @@ const context = {
 const contents = convertMessages(model, context, "claude-sonnet-4-6");
 assert.equal(contents.length, 3);
 assert.equal(contents[0]?.role, "user");
-assert.deepEqual(contents[1]?.parts[0], { thought: true, text: "plan" });
+assert.deepEqual(contents[1]?.parts[0], {
+  thought: true,
+  text: "plan",
+  thoughtSignature: "sig-1",
+});
 assert.ok(
   contents[1]?.parts.some((part) => "functionCall" in part && part.functionCall.id === "call-1"),
 );
@@ -295,6 +299,48 @@ assert.equal(prefillContents[0]?.role, "user");
 assert.equal(prefillContents[1]?.role, "model");
 assert.equal(prefillContents[2]?.role, "user");
 assert.deepEqual(prefillContents[2]?.parts, [{ text: "Please continue." }]);
+
+// Test trailing text after toolCall is dropped (Anthropic bridge rejects tool_use + trailing
+// text with 400 "assistant message prefill")
+const trailingTextContext = {
+  messages: [
+    { role: "user", content: "hi", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Let me check." },
+        { type: "toolCall", id: "call-9", name: "read", arguments: { path: "a.ts" } },
+        { type: "text", text: "§9§ " },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-opus-4-6",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-9",
+      toolName: "read",
+      content: [{ type: "text", text: "content" }],
+      isError: false,
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const trailingContents = convertMessages(model, trailingTextContext, "claude-opus-4-6-thinking");
+const modelMsg = trailingContents.find((c) => c.role === "model");
+assert.ok(modelMsg, "model message present");
+assert.ok(
+  modelMsg.parts.every((p) => !("text" in p) || p.text !== "§9§ "),
+  "trailing text after toolCall is dropped",
+);
+assert.deepEqual(
+  modelMsg.parts.map((p) => ("functionCall" in p ? "fc" : "text")),
+  ["text", "fc"],
+  "text before toolCall kept, text after dropped",
+);
 
 // Test assistant prefill conversion with empty assistant parts or tool-only user parts
 const emptyAssistantContext = {
