@@ -11,7 +11,64 @@ import {
   mapStopReason,
 } from "../src/stream/index.js";
 
+import { formatFooterStatus, getGroupShortLabel } from "../src/usage/index.js";
+
 const route = (model: string, effort?: string) => getAntigravityRequestModelId(model, effort);
+
+// Test getGroupShortLabel and formatFooterStatus
+assert.equal(getGroupShortLabel("Gemini Models", "gemini-5h"), "Gemini");
+assert.equal(getGroupShortLabel("Claude and GPT models", "3p-5h"), "Opus");
+
+const mockAccountUsage = {
+  projectId: "test-project",
+  endpoint: "https://cloudcode-pa.googleapis.com",
+  groups: [
+    {
+      displayName: "Gemini Models",
+      buckets: [
+        {
+          bucketId: "gemini-weekly",
+          displayName: "Weekly Limit",
+          window: "weekly",
+          resetTime: "2026-08-14T02:47:40Z",
+          remainingFraction: 0.938,
+        },
+        {
+          bucketId: "gemini-5h",
+          displayName: "Five Hour Limit",
+          window: "5h",
+          resetTime: "2026-08-07T12:47:40Z",
+          remainingFraction: 0.828,
+        },
+      ],
+    },
+    {
+      displayName: "Claude and GPT models",
+      buckets: [
+        {
+          bucketId: "3p-weekly",
+          displayName: "Weekly Limit",
+          window: "weekly",
+          resetTime: "2026-08-14T06:09:46Z",
+          remainingFraction: 0.658,
+        },
+        {
+          bucketId: "3p-5h",
+          displayName: "Five Hour Limit",
+          window: "5h",
+          resetTime: "2026-08-07T11:09:46Z",
+          remainingFraction: 0.007,
+        },
+      ],
+    },
+  ],
+  models: [],
+  fetchedAt: Date.now(),
+};
+
+const footerStatus = formatFooterStatus(mockAccountUsage);
+assert.ok(footerStatus.includes("Gemini 82.8%"), `unexpected footer status: ${footerStatus}`);
+assert.ok(footerStatus.includes("Opus 0.7%"), `unexpected footer status: ${footerStatus}`);
 
 const routeCases: Array<[string, string | undefined, string]> = [
   ["gemini-3.6-flash", undefined, "gemini-3.6-flash-low"],

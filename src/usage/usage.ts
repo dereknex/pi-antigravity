@@ -345,18 +345,38 @@ export function formatUsageSummary(usage: AccountUsage): string {
   return lines.join("\n").trimEnd();
 }
 
+export function getGroupShortLabel(groupName: string, bucketId?: string): string {
+  const lowerGroup = groupName.toLowerCase();
+  const lowerBucket = (bucketId || "").toLowerCase();
+
+  if (lowerGroup.includes("gemini") || lowerBucket.startsWith("gemini")) {
+    return "Gemini";
+  }
+  if (
+    lowerGroup.includes("claude") ||
+    lowerGroup.includes("gpt") ||
+    lowerGroup.includes("opus") ||
+    lowerGroup.includes("3p") ||
+    lowerBucket.startsWith("3p")
+  ) {
+    return "Opus";
+  }
+  return groupName.split(/\s+/)[0] || "Quota";
+}
+
 /** Compact single-line status for footer bar display. */
 export function formatFooterStatus(usage: AccountUsage): string {
   if (!usage.groups.length) return "Quota: n/a";
   const parts: string[] = [];
   for (const group of usage.groups) {
-    for (const bucket of group.buckets) {
-      const pct = remainingPercent(bucket.remainingFraction);
-      const reset = formatReset(bucket.resetTime);
-      // Shorten display name: take first word or abbreviation
-      const label = bucket.displayName.split(/\s+/)[0] || bucket.bucketId;
-      parts.push(`${label} ${pct ?? "?"}% (${reset})`);
-    }
+    const groupLabel = getGroupShortLabel(group.displayName, group.buckets[0]?.bucketId);
+    const targetBucket =
+      group.buckets.find((b) => b.window === "5h" || b.bucketId.includes("5h")) ||
+      group.buckets[0];
+    if (!targetBucket) continue;
+    const pct = remainingPercent(targetBucket.remainingFraction);
+    const reset = formatReset(targetBucket.resetTime);
+    parts.push(`${groupLabel} ${pct ?? "?"}% (${reset})`);
   }
   return parts.join(" · ") || "Quota: n/a";
 }

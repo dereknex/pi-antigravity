@@ -42,9 +42,20 @@ const STATUS_KEY = "antigravity.quota";
 /** Refresh quota and update footer status; swallows errors silently. */
 async function refreshFooterUsage(ctx: ExtensionContext): Promise<void> {
   try {
-    const apiKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity").catch(() => undefined);
-    if (!apiKey) return;
+    if (ctx.model?.provider !== PROVIDER_ID) {
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+      return;
+    }
+    const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID).catch(() => undefined);
+    if (!apiKey) {
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+      return;
+    }
     const usage = await fetchAccountUsage(apiKey);
+    if (ctx.model?.provider !== PROVIDER_ID) {
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+      return;
+    }
     const text = formatFooterStatus(usage);
     if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, text);
   } catch {
@@ -73,6 +84,10 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", (_event, ctx) => {
+    void refreshFooterUsage(ctx);
+  });
+
+  pi.on("model_select", (_event, ctx) => {
     void refreshFooterUsage(ctx);
   });
 
