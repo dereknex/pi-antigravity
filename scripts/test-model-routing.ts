@@ -296,6 +296,25 @@ assert.equal(prefillContents[1]?.role, "model");
 assert.equal(prefillContents[2]?.role, "user");
 assert.deepEqual(prefillContents[2]?.parts, [{ text: "Please continue." }]);
 
+// Test assistant prefill conversion with empty assistant parts or tool-only user parts
+const emptyAssistantContext = {
+  messages: [
+    { role: "user", content: "hello", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-opus-4-6",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const emptyAssistantContents = convertMessages(model, emptyAssistantContext, "claude-opus-4-6-thinking");
+assert.equal(emptyAssistantContents[emptyAssistantContents.length - 1]?.role, "user");
+
 // Test max output token limits per runtime model
 assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 65536);
 assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
