@@ -185,14 +185,6 @@ export function convertMessages(
     });
   }
 
-  // Ensure toolResult user content blocks carry a text part so Antigravity proxy doesn't omit
-  // the user turn when forwarding functionResponse payloads to Anthropic API backends.
-  for (const c of contents) {
-    if (c.role === GeminiRole.User && c.parts.length > 0 && !c.parts.some((p) => "text" in p)) {
-      c.parts.unshift({ text: "" });
-    }
-  }
-
   return contents;
 }
 
