@@ -141,7 +141,12 @@ export function convertMessages(
           });
         }
       }
-      if (parts.length) contents.push({ role: GeminiRole.Model, parts });
+      const last = contents[contents.length - 1];
+      if (last?.role === GeminiRole.Model) {
+        last.parts.push(...parts);
+      } else if (parts.length) {
+        contents.push({ role: GeminiRole.Model, parts });
+      }
     } else if (msg.role === "toolResult") {
       const text = msg.content
         .filter((c): c is TextContent => c.type === "text")
@@ -165,6 +170,17 @@ export function convertMessages(
       }
     }
   }
+
+  // Antigravity / Vertex API rejects requests ending in a model/assistant message
+  // ("This model does not support assistant message prefill. The conversation must end with a user message.").
+  // Append a user continuation turn when the conversation ends with an assistant message.
+  if (contents.length > 0 && contents[contents.length - 1]?.role === GeminiRole.Model) {
+    contents.push({
+      role: GeminiRole.User,
+      parts: [{ text: "Please continue." }],
+    });
+  }
+
   return contents;
 }
 
@@ -368,6 +384,9 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     }
     if (/Invalid JSON payload|Unknown name/i.test(msg)) {
       return `Antigravity request format was rejected by the backend (${msg}). Next: switch to a simpler model or retry after updating the extension.`;
+    }
+    if (/assistant message prefill|end with a user message/i.test(msg)) {
+      return `Antigravity rejected assistant message prefill (${msg}). Next: retry without prefill or update the extension.`;
     }
     if (/Request contains an invalid argument/i.test(msg)) {
       return `Antigravity rejected this request (${msg}). Next: retry once; if it keeps failing, switch models or re-login.`;

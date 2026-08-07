@@ -181,6 +181,18 @@ assert.match(
   friendlyAntigravityError(404, "Requested entity was not found"),
   /not available right now/i,
 );
+assert.match(
+  friendlyAntigravityError(
+    400,
+    JSON.stringify({
+      error: {
+        message:
+          "This model does not support assistant message prefill. The conversation must end with a user message.",
+      },
+    }),
+  ),
+  /rejected assistant message prefill/i,
+);
 
 const seedA = stableProjectId("user@example.com");
 const seedB = stableProjectId("user@example.com");
@@ -252,6 +264,37 @@ assert.ok(
       "output" in part.functionResponse.response,
   ),
 );
+
+// Test assistant prefill conversion (ensuring conversation ends with a user message)
+const prefillContext = {
+  messages: [
+    { role: "user", content: "hello", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Here is the response:" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-opus-4-6",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+
+const prefillContents = convertMessages(model, prefillContext, "claude-opus-4-6-thinking");
+assert.equal(prefillContents.length, 3);
+assert.equal(prefillContents[0]?.role, "user");
+assert.equal(prefillContents[1]?.role, "model");
+assert.equal(prefillContents[2]?.role, "user");
+assert.deepEqual(prefillContents[2]?.parts, [{ text: "Please continue." }]);
 
 // Test max output token limits per runtime model
 assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 65536);
