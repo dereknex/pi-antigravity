@@ -34,14 +34,16 @@ function clampFraction(value: unknown): number | undefined {
   return value;
 }
 
-function remainingPercent(remaining?: number): number | undefined {
+function usedPercent(remaining?: number): number | undefined {
   if (remaining === undefined) return undefined;
-  return Math.round(remaining * 1000) / 10;
+  const used = Math.max(0, Math.min(1, 1 - remaining));
+  return Math.round(used * 1000) / 10;
 }
 
 function progressBar(remaining?: number, width = 20): string {
   if (remaining === undefined) return `[${"?".repeat(width)}]`;
-  const filled = Math.max(0, Math.min(width, Math.round(remaining * width)));
+  const used = Math.max(0, Math.min(1, 1 - remaining));
+  const filled = Math.max(0, Math.min(width, Math.round(used * width)));
   return `[${"#".repeat(filled)}${"-".repeat(width - filled)}]`;
 }
 
@@ -335,9 +337,9 @@ export function formatUsageSummary(usage: AccountUsage): string {
     if (lines.length) lines.push("");
     lines.push(group.displayName);
     for (const bucket of group.buckets) {
-      const rem = remainingPercent(bucket.remainingFraction);
+      const used = usedPercent(bucket.remainingFraction);
       lines.push(
-        `  ${progressBar(bucket.remainingFraction)} ${bucket.displayName}: ${rem ?? "?"}% left · resets ${formatReset(bucket.resetTime)}`,
+        `  ${progressBar(bucket.remainingFraction)} ${bucket.displayName}: ${used ?? "?"}% used · resets ${formatReset(bucket.resetTime)}`,
       );
     }
   }
@@ -370,13 +372,23 @@ export function formatFooterStatus(usage: AccountUsage): string {
   const parts: string[] = [];
   for (const group of usage.groups) {
     const groupLabel = getGroupShortLabel(group.displayName, group.buckets[0]?.bucketId);
-    const targetBucket =
-      group.buckets.find((b) => b.window === "5h" || b.bucketId.includes("5h")) ||
-      group.buckets[0];
-    if (!targetBucket) continue;
-    const pct = remainingPercent(targetBucket.remainingFraction);
-    const reset = formatReset(targetBucket.resetTime);
-    parts.push(`${groupLabel} ${pct ?? "?"}% (${reset})`);
+    if (!group.buckets.length) continue;
+    const fiveHour = group.buckets.find(
+      (b) => b.window === "5h" || b.bucketId.toLowerCase().includes("5h"),
+    );
+    const weekly = group.buckets.find(
+      (b) => b.window === "weekly" || b.bucketId.toLowerCase().includes("weekly"),
+    );
+    const shown: string[] = [];
+    if (fiveHour) shown.push(`5h:${usedPercent(fiveHour.remainingFraction) ?? "?"}%`);
+    if (weekly) shown.push(`w:${usedPercent(weekly.remainingFraction) ?? "?"}%`);
+    if (!shown.length) {
+      const fallback = group.buckets[0];
+      shown.push(
+        `${fallback.window ?? fallback.displayName}:${usedPercent(fallback.remainingFraction) ?? "?"}%`,
+      );
+    }
+    parts.push(`${groupLabel} ${shown.join(" ")}`);
   }
   return parts.join(" · ") || "Quota: n/a";
 }
@@ -399,7 +411,7 @@ export function formatModelsList(usage: AccountUsage, opts?: { all?: boolean }):
 
   const maxId = Math.max(...rows.map((m) => m.modelId.length), 8);
   for (const m of rows) {
-    const rem = remainingPercent(m.remainingFraction);
+    const used = usedPercent(m.remainingFraction);
     const flags = [
       m.recommended ? "recommended" : "",
       m.supportsThinking ? "thinking" : "",
@@ -409,11 +421,11 @@ export function formatModelsList(usage: AccountUsage, opts?: { all?: boolean }):
       .join(",");
     const name = m.displayName && m.displayName !== m.modelId ? `  ${m.displayName}` : "";
     lines.push(
-      `${m.modelId.padEnd(maxId)}  rem ${rem === undefined ? "  ?" : String(rem).padStart(5)}%  reset ${formatReset(m.resetTime).padEnd(8)}${flags ? `  [${flags}]` : ""}${name}`,
+      `${m.modelId.padEnd(maxId)}  used ${used === undefined ? "  ?" : String(used).padStart(5)}%  reset ${formatReset(m.resetTime).padEnd(8)}${flags ? `  [${flags}]` : ""}${name}`,
     );
   }
   lines.push("");
-  lines.push("Note: remaining % is pool-shared (not a private per-model budget).");
+  lines.push("Note: used % is pool-shared (not a private per-model budget).");
   return lines.join("\n");
 }
 

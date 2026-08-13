@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth/index.js";
 import { DEFAULT_ENDPOINT } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";

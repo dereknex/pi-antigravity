@@ -67,7 +67,7 @@ Review these permissions before approving access. Re-run `/login antigravity` to
 | `/login antigravity`            | Sign in to Google and configure the provider.                                                    |
 | `/model antigravity/<model-id>` | Choose a registered Antigravity model.                                                           |
 | `/antigravity.usage`            | Show the server-reported shared quota groups and reset times.                                    |
-| `/antigravity.models`           | List available runtime models, remaining shared-pool quota, and capabilities.                    |
+| `/antigravity.models`           | List available runtime models, used shared-pool quota, and capabilities.                         |
 | `/antigravity.models all`       | Include tab/chat models normally hidden from the model list.                                     |
 | `/antigravity.doctor`           | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
 

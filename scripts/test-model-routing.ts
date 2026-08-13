@@ -67,8 +67,14 @@ const mockAccountUsage = {
 };
 
 const footerStatus = formatFooterStatus(mockAccountUsage);
-assert.ok(footerStatus.includes("Gemini 82.8%"), `unexpected footer status: ${footerStatus}`);
-assert.ok(footerStatus.includes("Opus 0.7%"), `unexpected footer status: ${footerStatus}`);
+assert.ok(
+  footerStatus.includes("Gemini 5h:17.2% w:6.2%"),
+  `unexpected footer status: ${footerStatus}`,
+);
+assert.ok(
+  footerStatus.includes("Opus 5h:99.3% w:34.2%"),
+  `unexpected footer status: ${footerStatus}`,
+);
 
 const routeCases: Array<[string, string | undefined, string]> = [
   ["gemini-3.6-flash", undefined, "gemini-3.6-flash-low"],
