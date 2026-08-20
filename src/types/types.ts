@@ -103,6 +103,10 @@ export type GeminiToolConfig = {
 export type GeminiGenerationConfig = {
   temperature?: number;
   maxOutputTokens?: number;
+  thinkingConfig?: {
+    thinkingBudget?: number;
+    includeThoughts?: boolean;
+  };
 };
 
 export type GeminiRequestBody = {

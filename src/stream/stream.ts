@@ -354,6 +354,20 @@ export function buildRequest(
   } else {
     generationConfig.maxOutputTokens = Math.min(maxAllowed, model.maxTokens || maxAllowed);
   }
+  // ponytail: cross-provider replay — history from non-Gemini providers has
+  // toolCalls without thoughtSignature. Gemini 3.7 enforces thought_signature
+  // when thinking is enabled → 400. Disable thinking when legacy calls exist.
+  const hasLegacyToolCall = context.messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray((m as { content?: unknown }).content) &&
+      ((m as { content: Array<{ type?: string; thoughtSignature?: string }> }).content || []).some(
+        (b) => b.type === "toolCall" && !b.thoughtSignature,
+      ),
+  );
+  if (hasLegacyToolCall && /^gemini-/i.test(runtimeModel)) {
+    generationConfig.thinkingConfig = { thinkingBudget: 0, includeThoughts: false };
+  }
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
   const tools = convertTools(
@@ -414,6 +428,9 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     }
     if (/assistant message prefill|end with a user message/i.test(msg)) {
       return `Antigravity rejected assistant message prefill (${msg}). Next: retry without prefill or update the extension.`;
+    }
+    if (/thought_signature|thoughtSignature/i.test(msg)) {
+      return `Antigravity rejected missing thought_signature (${msg}). Next: this is usually cross-provider history (e.g. kimi→gemini 3.7); update the extension (auto-disables thinking for legacy tool calls) or start a new session / switch to a non-thinking model.`;
     }
     if (/Request contains an invalid argument/i.test(msg)) {
       return `Antigravity rejected this request (${msg}). Next: retry once; if it keeps failing, switch models or re-login.`;
