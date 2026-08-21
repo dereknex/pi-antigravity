@@ -2,6 +2,7 @@
  * Live smoke: hit every registered public model with a tiny prompt.
  * Usage: node --import tsx scripts/smoke-all-models.mjs
  *        FILTER=gemini-3.5-flash node --import tsx scripts/smoke-all-models.mjs
+ *        FILTER=gemini-3.7-flash EFFORT=high node --import tsx scripts/smoke-all-models.mjs
  *        CONCURRENCY=2 TIMEOUT_MS=45000 node --import tsx scripts/smoke-all-models.mjs
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -33,6 +34,7 @@ const models = await import(pathToFileURL(join(root, "src/models/models.ts")).hr
 const CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 2));
 const TIMEOUT_MS = Math.max(5000, Number(process.env.TIMEOUT_MS || 60_000));
 const FILTER = (process.env.FILTER || "").trim();
+const EFFORT = (process.env.EFFORT || "off").trim().toLowerCase();
 const PROMPT = process.env.PROMPT || "Reply with exactly one word: pong";
 
 console.log(`email=${creds.email || "none"} projectId(auth)=${creds.projectId || "none"}`);
@@ -118,46 +120,69 @@ function parseSseText(text) {
 }
 
 async function smokeOne(publicId) {
-  const runtimeModel = models.getAntigravityRequestModelId(publicId, "off");
-  const isClaude = publicId.startsWith("claude-") || runtimeModel.startsWith("claude-");
-  const body = {
-    project: projectId,
-    model: runtimeModel,
-    request: {
-      contents: [{ role: "user", parts: [{ text: PROMPT }] }],
-      generationConfig: { maxOutputTokens: 256 },
-    },
-    requestType: "agent",
-    userAgent: "antigravity",
-    requestId: utils.nowRequestId(),
-  };
-
-  const headers = {
-    ...client.antigravityHeaders(refreshed.access),
-    ...(isClaude ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
-  };
+  const initialRuntimeModel = models.getAntigravityRequestModelId(publicId, EFFORT);
+  const candidates = [initialRuntimeModel];
+  const fallback = models.getFallbackRuntimeModel?.(initialRuntimeModel, EFFORT);
+  if (fallback && fallback !== initialRuntimeModel) candidates.push(fallback);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   const started = Date.now();
+  let runtimeModel = initialRuntimeModel;
   try {
-    // Mirror stream.ts: try production then daily/sandbox; fall through on 404/5xx.
     let res;
     let text = "";
     let usedEndpoint = endpoint;
-    for (const ep of client.endpointCandidates()) {
-      usedEndpoint = ep;
-      res = await fetch(`${ep}/v1internal:streamGenerateContent?alt=sse`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (res.ok) break;
-      text = await res.text();
-      if (res.status === 429 && /Individual quota reached/i.test(text)) break;
-      if (![403, 404, 429, 500, 502, 503, 504].includes(res.status)) break;
+
+    for (let i = 0; i < candidates.length; i++) {
+      runtimeModel = candidates[i];
+      const isClaude = publicId.startsWith("claude-") || runtimeModel.startsWith("claude-");
+      const generationConfig = { maxOutputTokens: 256 };
+      if (runtimeModel === "gemini-3.7-flash-tiered") {
+        generationConfig.thinkingConfig = {
+          thinkingLevel:
+            EFFORT === "high" || EFFORT === "xhigh"
+              ? "HIGH"
+              : EFFORT === "medium"
+                ? "MEDIUM"
+                : "LOW",
+        };
+      }
+      const body = {
+        project: projectId,
+        model: runtimeModel,
+        request: {
+          contents: [{ role: "user", parts: [{ text: PROMPT }] }],
+          generationConfig,
+        },
+        requestType: "agent",
+        userAgent: "antigravity",
+        requestId: utils.nowRequestId(),
+      };
+
+      const headers = {
+        ...client.antigravityHeaders(refreshed.access),
+        ...(isClaude ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
+      };
+
+      for (const ep of client.endpointCandidates()) {
+        usedEndpoint = ep;
+        res = await fetch(`${ep}/v1internal:streamGenerateContent?alt=sse`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (res.ok) break;
+        text = await res.text();
+        if (res.status === 429 && /Individual quota reached/i.test(text)) break;
+        if (![403, 404, 429, 500, 502, 503, 504].includes(res.status)) break;
+      }
+      if (res?.ok) break;
+      if (res?.status === 404 && i + 1 < candidates.length) continue;
+      break;
     }
+
     const ms = Date.now() - started;
     if (!res || !res.ok) {
       return {
@@ -247,6 +272,7 @@ writeFileSync(
       endpoint,
       availableRuntimeModels: availableIds,
       concurrency: CONCURRENCY,
+      effort: EFFORT,
       timeoutMs: TIMEOUT_MS,
       results,
       summary: { total: results.length, passed: passed.length, failed: failed.length },

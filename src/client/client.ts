@@ -20,11 +20,18 @@ export const ENDPOINT_FALLBACKS = [
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
 ];
 
-const PROJECT_CACHE_TTL_MS = 5 * 60 * 1000;
+const PROJECT_CACHE_TTL_MS = 30 * 60 * 1000;
 const projectCache = new Map<string, { projectId: string | undefined; expiresAt: number }>();
 
-const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
+const MODEL_CACHE_TTL_MS = 30 * 60 * 1000;
 const modelCache = new Map<string, { result: DynamicModelInfo | undefined; expiresAt: number }>();
+
+/** Metadata lookups (project/model discovery) must be fast; a stalled endpoint should
+ * fall through to the next candidate instead of hanging the whole request. */
+const DISCOVERY_TIMEOUT_MS = 8000;
+
+/** In-flight de-dupe: concurrent requests for the same (token, project, model) share one probe. */
+const inFlightModelLookups = new Map<string, Promise<DynamicModelInfo | undefined>>();
 
 /** UUID-shaped stable id from a seed (account email preferred over cwd). */
 export function stableProjectId(seed: string): string {
@@ -143,6 +150,7 @@ async function listCloudAICompanionProjects(token: string): Promise<string | und
         method: "POST",
         headers: antigravityHeaders(token),
         body: JSON.stringify({}),
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
       });
       setLastStatus(res.status);
       setLastEndpoint(endpoint);
@@ -198,12 +206,18 @@ export function isUsableRuntimeModelId(id: string): boolean {
 function buildModelMatchRegex(requestedId: string): RegExp {
   const req = requestedId.toLowerCase();
   // Display names from fetchAvailableModels (keys are the real runtime ids):
+  //   gemini-3.7-flash-low       → "Gemini 3.7 Flash (Low)"
+  //   gemini-3.7-flash-medium    → "Gemini 3.7 Flash (Medium)"
+  //   gemini-3.7-flash-high      → "Gemini 3.7 Flash (High)"
   //   gemini-3.6-flash-low       → "Gemini 3.6 Flash (Low)"
   //   gemini-3.6-flash-medium    → "Gemini 3.6 Flash (Medium)"
   //   gemini-3.6-flash-high      → "Gemini 3.6 Flash (High)"
   //   gemini-3.5-flash-extra-low → "Gemini 3.5 Flash (Low)"
   //   gemini-3.5-flash-low       → "Gemini 3.5 Flash (Medium)"
   //   gemini-3-flash-agent       → "Gemini 3.5 Flash (High)"
+  if (req === "gemini-3.7-flash-low") return /gemini[- ]3\.7[- ]flash \(low\)/i;
+  if (req === "gemini-3.7-flash-medium") return /gemini[- ]3\.7[- ]flash \(medium\)/i;
+  if (req === "gemini-3.7-flash-high") return /gemini[- ]3\.7[- ]flash \(high\)/i;
   if (req === "gemini-3.6-flash-low") return /gemini[- ]3\.6[- ]flash \(low\)/i;
   if (req === "gemini-3.6-flash-medium") return /gemini[- ]3\.6[- ]flash \(medium\)/i;
   if (req === "gemini-3.6-flash-high") return /gemini[- ]3\.6[- ]flash \(high\)/i;
@@ -292,32 +306,36 @@ async function fetchAvailableRuntimeModelUncached(
   projectId: string,
   requestedRuntimeModel: string,
 ): Promise<DynamicModelInfo | undefined> {
-  const bodies = [{}, { cloudaicompanionProject: projectId }, { project: projectId }];
-  // New models (e.g. Gemini 3.6 Flash) may land on daily/sandbox before production.
-  // Keep searching endpoints until the requested runtime id is found.
+  const body = JSON.stringify({ project: projectId });
+  const endpoints = endpointCandidates();
   let lastLabels = "";
-  for (const endpoint of endpointCandidates()) {
-    for (const candidateBody of bodies) {
-      try {
-        const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
-          method: "POST",
-          headers: antigravityHeaders(token),
-          body: JSON.stringify(candidateBody),
-        });
-        setLastStatus(res.status);
-        setLastEndpoint(endpoint);
-        if (!res.ok) continue;
-        const data: unknown = await res.json();
-        const labels = [...new Set(collectModelLabels(data))].slice(0, 16);
-        lastLabels = labels.join(",");
-        setLastAvailableModels(lastLabels);
-        const found = findDynamicModel(data, requestedRuntimeModel);
-        if (found) return found;
-      } catch (error) {
-        setLastError(safeError(error));
+
+  // Try endpoints in priority order (production first). If the primary endpoint
+  // resolves the model, return immediately without waiting on slower sandbox endpoints.
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+        method: "POST",
+        headers: antigravityHeaders(token),
+        body,
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+      });
+      setLastStatus(res.status);
+      if (!res.ok) continue;
+      setLastEndpoint(endpoint);
+      const data: unknown = await res.json();
+      const labels = [...new Set(collectModelLabels(data))].slice(0, 16);
+      if (labels.length) lastLabels = labels.join(",");
+      const found = findDynamicModel(data, requestedRuntimeModel);
+      if (found) {
+        if (lastLabels) setLastAvailableModels(lastLabels);
+        return found;
       }
+    } catch (error) {
+      setLastError(safeError(error));
     }
   }
+
   if (lastLabels) setLastAvailableModels(lastLabels);
   return undefined;
 }
@@ -331,17 +349,30 @@ export async function fetchAvailableRuntimeModel(
   const cached = modelCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.result;
 
-  const result = await fetchAvailableRuntimeModelUncached(token, projectId, requestedRuntimeModel);
-  modelCache.set(cacheKey, { result, expiresAt: Date.now() + MODEL_CACHE_TTL_MS });
+  // De-dupe concurrent lookups for the same key (e.g. parallel requests right after
+  // startup) so they share one probe instead of each firing their own round-trips.
+  const inFlight = inFlightModelLookups.get(cacheKey);
+  if (inFlight) return inFlight;
 
-  // Evict expired entries; bound map size to avoid unbounded growth.
-  if (modelCache.size > 64) {
-    const now = Date.now();
-    for (const [key, entry] of modelCache) {
-      if (entry.expiresAt <= now) modelCache.delete(key);
+  const promise = fetchAvailableRuntimeModelUncached(token, projectId, requestedRuntimeModel).then(
+    (result) => {
+      modelCache.set(cacheKey, { result, expiresAt: Date.now() + MODEL_CACHE_TTL_MS });
+      return result;
+    },
+  );
+  inFlightModelLookups.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightModelLookups.delete(cacheKey);
+    // Evict expired entries; bound map size to avoid unbounded growth.
+    if (modelCache.size > 64) {
+      const now = Date.now();
+      for (const [key, entry] of modelCache) {
+        if (entry.expiresAt <= now) modelCache.delete(key);
+      }
     }
   }
-  return result;
 }
 
 export function clearModelCache(): void {
@@ -363,6 +394,7 @@ async function loadCodeAssistUncached(token: string): Promise<string | undefined
         method: "POST",
         headers: antigravityHeaders(token),
         body,
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
       });
       setLastStatus(res.status);
       setLastEndpoint(endpoint);

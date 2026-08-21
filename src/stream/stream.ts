@@ -24,6 +24,7 @@ import {
   runWithDiagnostics,
   setLastEndpoint,
   setLastError,
+  setLastLatencyMs,
   setLastProjectId,
   setLastResolvedRuntimeModel,
   setLastStatus,
@@ -36,7 +37,13 @@ import {
   StopReason,
   ToolChoice,
 } from "../types/enums.js";
-import { getMaxOutputTokens, getAntigravityRequestModelId, PROVIDER_ID } from "../models/models.js";
+import {
+  ANTIGRAVITY_ROUTING,
+  getMaxOutputTokens,
+  getAntigravityRequestModelId,
+  getFallbackRuntimeModel,
+  PROVIDER_ID,
+} from "../models/models.js";
 import { redactSecrets, safeError } from "../utils/security.js";
 import {
   ANTIGRAVITY_API,
@@ -82,6 +89,20 @@ function toolCallIdNeeded(modelId: string, runtimeModel: string): boolean {
   );
 }
 
+function parseImageData(raw: string, explicitMime?: string): { data: string; mimeType: string } {
+  const match = raw.match(/^data:([^;]+);base64,(.+)$/s);
+  if (match) {
+    return {
+      mimeType: explicitMime || match[1] || "image/png",
+      data: match[2].trim(),
+    };
+  }
+  return {
+    mimeType: explicitMime || "image/png",
+    data: raw.trim(),
+  };
+}
+
 function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataPart> {
   if (typeof content === "string") return [{ text: sanitizeText(content) }];
   if (!Array.isArray(content)) return [];
@@ -90,12 +111,24 @@ function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataP
     const block = item as ContentBlock;
     if (block.type === "text") return [{ text: sanitizeText(block.text) }];
     if (block.type === "image") {
-      const data = block.data || block.source?.data;
-      const mimeType = block.mimeType || block.mediaType || block.source?.mediaType || "image/png";
+      const rawData = block.data || block.source?.data;
+      if (!rawData) return [];
+      const explicitMime = block.mimeType || block.mediaType || block.source?.mediaType;
+      const { data, mimeType } = parseImageData(rawData, explicitMime);
       return data ? [{ inlineData: { mimeType, data } }] : [];
     }
     return [];
   });
+}
+
+function appendTurn(contents: GeminiContent[], role: GeminiRole, parts: GeminiPart[]): void {
+  if (!parts.length) return;
+  const last = contents[contents.length - 1];
+  if (last && last.role === role) {
+    last.parts.push(...parts);
+  } else {
+    contents.push({ role, parts });
+  }
 }
 
 /** Exported for unit tests. */
@@ -108,14 +141,7 @@ export function convertMessages(
   for (const msg of context.messages) {
     if (msg.role === "user") {
       const parts = asTextParts(msg.content);
-      if (parts.length) {
-        const last = contents[contents.length - 1];
-        if (last?.role === GeminiRole.User) {
-          last.parts.push(...parts);
-        } else {
-          contents.push({ role: GeminiRole.User, parts });
-        }
-      }
+      appendTurn(contents, GeminiRole.User, parts);
     } else if (msg.role === "assistant") {
       const parts: GeminiPart[] = [];
       let sawToolCall = false;
@@ -159,12 +185,7 @@ export function convertMessages(
           }
         }
       }
-      const last = contents[contents.length - 1];
-      if (last?.role === GeminiRole.Model) {
-        last.parts.push(...parts);
-      } else if (parts.length) {
-        contents.push({ role: GeminiRole.Model, parts });
-      }
+      appendTurn(contents, GeminiRole.Model, parts);
     } else if (msg.role === "toolResult") {
       const text = msg.content
         .filter((c): c is TextContent => c.type === "text")
@@ -180,13 +201,18 @@ export function convertMessages(
             : {}),
         },
       };
-      const last = contents[contents.length - 1];
-      if (last?.role === GeminiRole.User) {
-        last.parts.push(part);
-      } else {
-        contents.push({ role: GeminiRole.User, parts: [part] });
-      }
+      appendTurn(contents, GeminiRole.User, [part]);
     }
+  }
+
+  // Google Antigravity / Gemini requires the first turn to be from 'user'.
+  // If the conversation starts with 'model' (e.g. initial assistant greeting),
+  // prepend a minimal user message to prevent backend 400 rejection.
+  if (contents.length > 0 && contents[0]?.role === GeminiRole.Model) {
+    contents.unshift({
+      role: GeminiRole.User,
+      parts: [{ text: "Hello" }],
+    });
   }
 
   // Antigravity / Vertex API rejects requests ending in a model/assistant message
@@ -197,18 +223,59 @@ export function convertMessages(
     contents.length > 0 &&
     (contents[contents.length - 1]?.role === GeminiRole.Model || lastMsg?.role === "assistant")
   ) {
-    const last = contents[contents.length - 1];
-    if (last?.role === GeminiRole.User) {
-      last.parts.push({ text: "Please continue." });
-    } else {
-      contents.push({
-        role: GeminiRole.User,
-        parts: [{ text: "Please continue." }],
-      });
-    }
+    appendTurn(contents, GeminiRole.User, [{ text: "Please continue." }]);
   }
 
   return contents;
+}
+
+function dereferenceSchema(
+  schema: unknown,
+  rootDefs: Record<string, unknown> = {},
+  visited = new Set<unknown>(),
+): unknown {
+  if (!schema || typeof schema !== "object") return schema;
+  if (Array.isArray(schema)) {
+    return schema.map((item) => dereferenceSchema(item, rootDefs, visited));
+  }
+
+  const s = schema as Record<string, unknown>;
+  if (visited.has(s)) return s;
+  visited.add(s);
+
+  const defs: Record<string, unknown> = { ...rootDefs };
+  if (isRecord(s.$defs)) Object.assign(defs, s.$defs);
+  if (isRecord(s.definitions)) Object.assign(defs, s.definitions);
+
+  if (typeof s.$ref === "string") {
+    const ref = s.$ref;
+    const match = ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/);
+    if (match && match[1] && defs[match[1]] !== undefined) {
+      const resolved = dereferenceSchema(defs[match[1]], defs, visited);
+      if (isRecord(resolved)) {
+        const { $ref: _, ...rest } = s;
+        const restCleaned = dereferenceSchema(rest, defs, visited);
+        return isRecord(restCleaned) ? { ...resolved, ...restCleaned } : resolved;
+      }
+      return resolved;
+    }
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(s)) {
+    out[key] = dereferenceSchema(value, defs, visited);
+  }
+  return out;
+}
+
+function ensureRootObjectSchema(schema: unknown): Record<string, unknown> {
+  if (!isRecord(schema)) {
+    return { type: "object", properties: {} };
+  }
+  if (!schema.type) {
+    return { ...schema, type: "object", properties: schema.properties || {} };
+  }
+  return schema;
 }
 
 function stripMetaSchema(schema: unknown): unknown {
@@ -303,7 +370,9 @@ export function convertTools(
   return [
     {
       functionDeclarations: tools.map((tool) => {
-        const schema = stripMetaSchema(tool.parameters);
+        const dereferenced = dereferenceSchema(tool.parameters);
+        const rootObject = ensureRootObjectSchema(dereferenced);
+        const schema = stripMetaSchema(rootObject);
         return {
           name: tool.name,
           description: tool.description,
@@ -348,6 +417,13 @@ export function buildRequest(
 
   const generationConfig: GeminiGenerationConfig = {};
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
+  if (runtimeModel === "gemini-3.7-flash-tiered") {
+    const effort = options.reasoning ?? "off";
+    generationConfig.thinkingConfig = {
+      thinkingLevel:
+        effort === "high" || effort === "xhigh" ? "HIGH" : effort === "medium" ? "MEDIUM" : "LOW",
+    };
+  }
   const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
   if (options.maxTokens !== undefined) {
     generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
@@ -448,7 +524,7 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
   }
   if (status === 404) {
     if (/Requested entity was not found/i.test(msg)) {
-      return "This model is not available right now. Next: switch to gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro, or another working model.";
+      return "This model is not available right now. Next: switch to gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro, or another working model.";
     }
     return `Antigravity could not find the requested resource. Next: retry or switch models. Backend said: ${msg}`;
   }
@@ -677,6 +753,7 @@ export function streamAntigravity(
   const opts = options ?? {};
 
   void runWithDiagnostics(async () => {
+    const startTime = Date.now();
     const output = createOutput(model);
     try {
       const creds = parseApiKey(opts.apiKey);
@@ -690,19 +767,25 @@ export function streamAntigravity(
       setLastProjectId(projectId);
 
       const effort = opts.reasoning ?? "off";
+      const isKnownModel = model.id in ANTIGRAVITY_ROUTING;
       const baseRuntimeModel =
         antigravityEnv("RUNTIME_MODEL")?.trim() || getAntigravityRequestModelId(model.id, effort);
 
-      const dynamic = await fetchAvailableRuntimeModel(creds.token, projectId, baseRuntimeModel);
-      // Catalog values often include MODEL_PLACEHOLDER_* enums that 404 on stream;
-      // only adopt dynamic ids that look like real runtime model ids.
-      const runtimeModel =
-        dynamic?.id && /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)
-          ? dynamic.id
-          : baseRuntimeModel;
-      setLastResolvedRuntimeModel(runtimeModel);
+      let initialRuntimeModel = baseRuntimeModel;
+      // Skip pre-flight model discovery for known static models to optimize TTFT latency.
+      // Dynamic lookup is only needed for unmapped custom models.
+      if (!isKnownModel && !antigravityEnv("RUNTIME_MODEL")) {
+        const dynamic = await fetchAvailableRuntimeModel(creds.token, projectId, baseRuntimeModel);
+        if (dynamic?.id && /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)) {
+          initialRuntimeModel = dynamic.id;
+        }
+      }
 
-      const body = JSON.stringify(buildRequest(model, context, projectId, opts, runtimeModel));
+      const runtimeCandidates = [initialRuntimeModel];
+      const fallback = getFallbackRuntimeModel(initialRuntimeModel, effort);
+      if (fallback && fallback !== initialRuntimeModel) {
+        runtimeCandidates.push(fallback);
+      }
 
       const isClaudeReasoning = model.id.startsWith("claude-") && model.reasoning;
       const requestHeaders: Record<string, string> = {
@@ -713,6 +796,7 @@ export function streamAntigravity(
       let response: Response | undefined;
       let lastText = "";
       let received = false;
+      let runtimeModel = initialRuntimeModel;
 
       for (let emptyAttempt = 0; emptyAttempt <= 2; emptyAttempt++) {
         if (opts.signal?.aborted) throw new Error("Request was aborted");
@@ -721,25 +805,57 @@ export function streamAntigravity(
           await new Promise((res) => setTimeout(res, delay));
         }
 
-        for (const endpoint of endpointCandidates()) {
-          setLastEndpoint(endpoint);
-          response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-            method: "POST",
-            headers: requestHeaders,
-            body,
-            signal: opts.signal,
-          });
-          setLastStatus(response.status);
-          if (response.ok) break;
-          lastText = await response.text();
-          if (response.status === 429 && /Individual quota reached/i.test(lastText)) break;
-          if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
+        for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
+          runtimeModel = runtimeCandidates[candIdx]!;
+          setLastResolvedRuntimeModel(runtimeModel);
+          const body = JSON.stringify(buildRequest(model, context, projectId, opts, runtimeModel));
+
+          for (const endpoint of endpointCandidates()) {
+            setLastEndpoint(endpoint);
+            response = await fetch(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+              method: "POST",
+              headers: requestHeaders,
+              body,
+              signal: opts.signal,
+            });
+            setLastStatus(response.status);
+            if (response.ok) break;
+            lastText = await response.text();
+            if (response.status === 429 && /Individual quota reached/i.test(lastText)) break;
+            if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
+          }
+
+          if (response?.ok) break;
+          if (response?.status === 404) {
+            if (candIdx + 1 < runtimeCandidates.length) {
+              continue;
+            }
+            if (isKnownModel && candIdx === runtimeCandidates.length - 1) {
+              const dynamic = await fetchAvailableRuntimeModel(
+                creds.token,
+                projectId,
+                baseRuntimeModel,
+              );
+              if (
+                dynamic?.id &&
+                !runtimeCandidates.includes(dynamic.id) &&
+                /^(gemini-|claude-|gpt-oss-)/i.test(dynamic.id)
+              ) {
+                runtimeCandidates.push(dynamic.id);
+                continue;
+              }
+            }
+          }
+          break;
         }
 
         if (!response || !response.ok) {
           if (antigravityEnv("DEBUG_DUMP") === "1") {
             try {
               const { writeFileSync } = await import("node:fs");
+              const body = JSON.stringify(
+                buildRequest(model, context, projectId, opts, runtimeModel),
+              );
               let parsedBody: unknown = body;
               try {
                 parsedBody = JSON.parse(body) as unknown;
@@ -788,6 +904,7 @@ export function streamAntigravity(
       }
 
       if (!received) throw new Error("Antigravity API returned an empty response");
+      setLastLatencyMs(Date.now() - startTime);
       if (output.stopReason === "error" || output.stopReason === "aborted") {
         stream.push({ type: "error", reason: output.stopReason, error: output });
       } else {
@@ -795,6 +912,7 @@ export function streamAntigravity(
       }
       stream.end();
     } catch (error) {
+      setLastLatencyMs(Date.now() - startTime);
       output.stopReason = opts.signal?.aborted ? "aborted" : "error";
       output.errorMessage = safeError(error);
       setLastError(output.errorMessage);

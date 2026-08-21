@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { defaultProjectId, loadCodeAssist } from "../client/client.js";
 import { escapeHtml, antigravityEnv } from "../utils/util.js";
@@ -11,6 +11,7 @@ export const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 export const TOKEN_URL = "https://oauth2.googleapis.com/token";
 export const OAUTH_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 export const SCOPES = [
+  "https://www.googleapis.com/auth/aicode",
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
@@ -86,6 +87,13 @@ async function getUserEmail(token: string): Promise<string | undefined> {
   }
 }
 
+function closeServerGracefully(server: Server): void {
+  if ("closeAllConnections" in server && typeof server.closeAllConnections === "function") {
+    server.closeAllConnections();
+  }
+  server.close();
+}
+
 function startCallbackServer(expectedState: string): Promise<CallbackServer> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -146,11 +154,22 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
       finish(() => resolveCode({ code, state }));
     });
 
-    server.on("error", reject);
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        reject(
+          new Error(
+            "Port 51121 is already in use by another process. Please close the process using port 51121 and retry /login antigravity.",
+          ),
+        );
+      } else {
+        reject(err);
+      }
+    });
+
     server.listen(51121, CALLBACK_HOST, () => {
       timeout = setTimeout(() => {
         finish(() => rejectCode(new Error("OAuth callback timed out waiting for browser login")));
-        server.close();
+        closeServerGracefully(server);
       }, OAUTH_CALLBACK_TIMEOUT_MS);
       resolve({ server, waitForCode: () => codePromise });
     });
@@ -235,7 +254,7 @@ export async function loginAntigravity(
       email,
     };
   } finally {
-    server.close();
+    closeServerGracefully(server);
   }
 }
 
@@ -262,7 +281,11 @@ export async function refreshAntigravityToken(
     expires_in: number;
     refresh_token?: string;
   };
-  const discoveredProject = await loadCodeAssist(data.access_token);
+  // Every refresh mints a brand-new access token, so loadCodeAssist's token-keyed cache
+  // can never hit here — skip the extra round-trip entirely when we already know the
+  // project id (the normal case; it's set at login and doesn't change token to token).
+  const existingProjectId = credentialProjectId(credentials);
+  const discoveredProject = existingProjectId ? undefined : await loadCodeAssist(data.access_token);
   const email = credentialEmail(credentials);
   return {
     ...credentials,
@@ -270,9 +293,7 @@ export async function refreshAntigravityToken(
     access: data.access_token,
     expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
     projectId:
-      discoveredProject ||
-      credentialProjectId(credentials) ||
-      defaultProjectId(email || "antigravity-default"),
+      existingProjectId || discoveredProject || defaultProjectId(email || "antigravity-default"),
   };
 }
 

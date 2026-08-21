@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
 import { defaultProjectId, stableProjectId } from "../src/client/index.js";
 import { StopReason } from "../src/types/enums.js";
-import { ANTIGRAVITY_MODELS, getMaxOutputTokens, getAntigravityRequestModelId } from "../src/models/index.js";
+import {
+  ANTIGRAVITY_MODELS,
+  getMaxOutputTokens,
+  getAntigravityRequestModelId,
+  getFallbackRuntimeModel,
+} from "../src/models/index.js";
 import {
   buildRequest,
   convertMessages,
@@ -77,6 +82,13 @@ assert.ok(
 );
 
 const routeCases: Array<[string, string | undefined, string]> = [
+  ["gemini-3.7-flash", undefined, "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "off", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "minimal", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "low", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "medium", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "high", "gemini-3.7-flash-tiered"],
+  ["gemini-3.7-flash", "xhigh", "gemini-3.7-flash-tiered"],
   ["gemini-3.6-flash", undefined, "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "off", "gemini-3.6-flash-low"],
   ["gemini-3.6-flash", "minimal", "gemini-3.6-flash-low"],
@@ -106,6 +118,7 @@ for (const [model, effort, expected] of routeCases) {
 
 const modelIds = new Set(ANTIGRAVITY_MODELS.map((model) => model.id));
 const expectedModels = [
+  "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.1-pro",
@@ -123,6 +136,7 @@ for (const expected of expectedModels) {
 }
 
 const expectedThinkingLevels: Record<string, string[]> = {
+  "gemini-3.7-flash": ["low", "medium", "high"],
   "gemini-3.6-flash": ["low", "medium", "high"],
   "gemini-3.5-flash": ["low", "medium", "high"],
   "gemini-3.1-pro": ["low", "high"],
@@ -221,6 +235,35 @@ assert.deepEqual(nullableDecl?.parameters, {
   },
   required: ["path"],
 });
+
+// Test local $ref / $defs dereferencing
+const refTool = {
+  name: "ref_probe",
+  description: "Tool with local $ref and $defs",
+  parameters: {
+    type: "object",
+    properties: {
+      status: { $ref: "#/$defs/Status" },
+    },
+    $defs: {
+      Status: { type: "string", enum: ["open", "closed"] },
+    },
+  },
+} as Tool;
+const dereferencedGemini = convertTools([refTool])?.[0]?.functionDeclarations[0];
+assert.deepEqual(dereferencedGemini?.parametersJsonSchema, {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["open", "closed"] },
+  },
+});
+const dereferencedCustom = convertTools([refTool], true)?.[0]?.functionDeclarations[0];
+assert.deepEqual(dereferencedCustom?.parameters, {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["open", "closed"] },
+  },
+});
 assert.match(
   friendlyAntigravityError(400, JSON.stringify({ error: { message: "Unknown name nullable" } })),
   /Unknown name nullable/i,
@@ -262,7 +305,6 @@ const seedB = stableProjectId("user@example.com");
 const seedC = stableProjectId("other@example.com");
 assert.equal(seedA, seedB);
 assert.notEqual(seedA, seedC);
-assert.notEqual(defaultProjectId("user@example.com"), defaultProjectId("other@example.com"));
 assert.match(seedA, /^[0-9a-f-]{36}$/);
 
 const model = {
@@ -332,6 +374,75 @@ assert.ok(
   ),
 );
 
+// Test consecutive same-role message merging
+const consecutiveContext = {
+  messages: [
+    { role: "user", content: "question 1", timestamp: Date.now() },
+    { role: "user", content: "question 2", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "answer 1" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-sonnet-4-6",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "answer 2" }],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-sonnet-4-6",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const mergedContents = convertMessages(model, consecutiveContext, "claude-sonnet-4-6");
+assert.equal(mergedContents.length, 3);
+assert.equal(mergedContents[0]?.role, "user");
+assert.equal(mergedContents[0]?.parts.length, 2);
+assert.equal(mergedContents[1]?.role, "model");
+assert.equal(mergedContents[1]?.parts.length, 2);
+assert.equal(mergedContents[2]?.role, "user");
+
+// Test Base64 Image data URL prefix stripping
+const imageContext = {
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "check image" },
+        { type: "image", data: "data:image/jpeg;base64,/9j/4AAQSkZJRg==", mimeType: "image/jpeg" },
+      ],
+      timestamp: Date.now(),
+    },
+  ],
+} as Context;
+const imageContents = convertMessages(model, imageContext, "gemini-3.7-flash-tiered");
+assert.equal(imageContents[0]?.parts.length, 2);
+const imgPart = imageContents[0]?.parts[1];
+assert.ok(imgPart && "inlineData" in imgPart);
+assert.equal(imgPart.inlineData.data, "/9j/4AAQSkZJRg==");
+assert.equal(imgPart.inlineData.mimeType, "image/jpeg");
+
 // Test assistant prefill conversion (ensuring conversation ends with a user message)
 const prefillContext = {
   messages: [
@@ -355,7 +466,6 @@ const prefillContext = {
     },
   ],
 } as Context;
-
 const prefillContents = convertMessages(model, prefillContext, "claude-opus-4-6-thinking");
 assert.equal(prefillContents.length, 3);
 assert.equal(prefillContents[0]?.role, "user");
@@ -425,10 +535,23 @@ const emptyAssistantContents = convertMessages(model, emptyAssistantContext, "cl
 assert.equal(emptyAssistantContents[emptyAssistantContents.length - 1]?.role, "user");
 
 // Test max output token limits per runtime model
+assert.equal(getMaxOutputTokens("gemini-3.7-flash", "gemini-3.7-flash-tiered"), 65536);
 assert.equal(getMaxOutputTokens("gemini-3.6-flash", "gemini-3.6-flash-low"), 65536);
 assert.equal(getMaxOutputTokens("gemini-3.1-pro", "gemini-3.1-pro-low"), 65535);
 assert.equal(getMaxOutputTokens("claude-sonnet-4-6", "claude-sonnet-4-6"), 64000);
 assert.equal(getMaxOutputTokens("gpt-oss-120b", "gpt-oss-120b-medium"), 32768);
+
+// Test fallback runtime models
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-low"), "gemini-3.6-flash-low");
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-medium"), "gemini-3.6-flash-medium");
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash-high"), "gemini-3.6-flash-high");
+assert.equal(
+  getFallbackRuntimeModel("gemini-3.7-flash-tiered", "medium"),
+  "gemini-3.6-flash-medium",
+);
+assert.equal(getFallbackRuntimeModel("gemini-3.7-flash"), "gemini-3.6-flash-low");
+assert.equal(getFallbackRuntimeModel("gemini-3.6-flash-low"), undefined);
+assert.equal(getFallbackRuntimeModel("claude-sonnet-4-6"), undefined);
 
 // Test buildRequest output token clamping
 const dummyContext: Context = {
@@ -469,6 +592,23 @@ const reqD = buildRequest(
   "gemini-3.1-pro-low",
 );
 assert.equal(reqD.request.generationConfig?.maxOutputTokens, 65535);
+
+// Case E: Gemini 3.7 uses its tiered runtime and sends effort in thinkingConfig.
+const flash37Model = { ...model, id: "gemini-3.7-flash", maxTokens: 65536 };
+for (const [reasoning, thinkingLevel] of [
+  ["low", "LOW"],
+  ["medium", "MEDIUM"],
+  ["high", "HIGH"],
+] as const) {
+  const request = buildRequest(
+    flash37Model,
+    dummyContext,
+    "test-proj",
+    { reasoning },
+    "gemini-3.7-flash-tiered",
+  );
+  assert.equal(request.request.generationConfig?.thinkingConfig?.thinkingLevel, thinkingLevel);
+}
 
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,

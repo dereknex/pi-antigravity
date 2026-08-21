@@ -123,6 +123,7 @@ export default function (pi: ExtensionAPI): void {
         `lastEndpoint=${d.endpoint || "none"}`,
         `lastStatus=${d.status ?? "none"}`,
         `lastProjectId=${d.projectId || "none"}`,
+        ...(d.latencyMs !== undefined ? [`lastLatencyMs=${d.latencyMs}`] : []),
         `lastError=${d.error ? redactSecrets(d.error) : "none"}`,
         "transport=native-streamSimple",
         "runtimeCli=not-used",
