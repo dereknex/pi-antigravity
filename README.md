@@ -83,6 +83,7 @@ Review these permissions before approving access. If your credentials expire or 
 | `/model antigravity/<model-id>` | Choose a registered Antigravity model.                                                           |
 | `/antigravity.usage`            | Show the server-reported shared quota groups and reset times.                                    |
 | `/antigravity.models`           | List available runtime models, used shared-pool quota, and capabilities.                         |
+| `/antigravity.models sync`      | Re-sync the model catalog from the backend, then list.                                           |
 | `/antigravity.models all`       | Include tab/chat models normally hidden from the model list.                                     |
 | `/antigravity.doctor`           | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
 
@@ -91,6 +92,8 @@ Model availability, entitlement, quota groups, and resets are returned by the se
 ## Models and routing
 
 The static model IDs registered by this extension match the Antigravity CLI catalog (`agy models`). Use `/antigravity.models` to see live availability and quota for your account — the table below is a reference for what each public model ID maps to.
+
+New model families advertised by the backend are picked up automatically: on every session start (and via `/antigravity.models sync`) the extension fetches the live catalog and registers unknown runtime families as selectable models, deriving their thinking levels from the advertised tiers. The seven curated models below keep their hand-tuned routing; offline or on fetch failure the extension falls back to them.
 
 `agy models` advertises display entries across Gemini Flash (3.7, 3.6, 3.5), Gemini Pro, Claude Sonnet/Opus Thinking, and GPT-OSS Medium. Pi collapses those into seven public model IDs, each showing only the thinking level(s) that model advertises.
 

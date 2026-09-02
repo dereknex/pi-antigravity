@@ -1,5 +1,5 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import type { AntigravityRouting } from "../types/types.js";
+import type { AntigravityRouting, ModelQuotaRow } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
 
 export const PROVIDER_ID = "antigravity";
@@ -265,9 +265,12 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
   },
 ];
 
+/** Routing entries derived from the live backend catalog (see applyDerivedModels). */
+const derivedRouting: Record<string, AntigravityRouting> = {};
+
 /** Resolve public model id + thinking effort to Antigravity runtime model id. */
 export function getAntigravityRequestModelId(modelId: string, effort: string | undefined): string {
-  const r = ANTIGRAVITY_ROUTING[modelId];
+  const r = derivedRouting[modelId] ?? ANTIGRAVITY_ROUTING[modelId];
   if (!r) return modelId;
 
   if (effort === undefined || effort === "off") {
@@ -295,6 +298,204 @@ export function getAntigravityRequestModelId(modelId: string, effort: string | u
     r.defaultRequestId ??
     modelId
   );
+}
+
+/** True when a model id has curated static routing or was derived from the live catalog. */
+export function isKnownAntigravityModel(modelId: string): boolean {
+  return modelId in ANTIGRAVITY_ROUTING || modelId in derivedRouting;
+}
+
+// --- Live catalog sync ---------------------------------------------------
+
+/**
+ * Derive Pi model configs from the backend `fetchAvailableModels` catalog so NEW
+ * model families appear in the picker without a code change. Families with
+ * curated static routing always keep it (quirks like `gemini-pro-agent` must not
+ * be auto-remapped); derivation only ADDS unknown families.
+ *
+ * ponytail: tier changes *within* an existing family (e.g. a new `-medium` on
+ * gemini-3.7-flash) still need a code update — auto-overriding curated routing
+ * risks regressing working models.
+ */
+type RuntimeTier = "extra-low" | "low" | "medium" | "high" | "thinking" | "agent" | "none";
+
+/** Runtime `-agent` ids whose family name cannot be derived by suffix stripping. */
+const AGENT_QUIRKS: Record<string, { family: string; tier: RuntimeTier }> = {
+  "gemini-pro-agent": { family: "gemini-3.1-pro", tier: "agent" },
+  "gemini-3-flash-agent": { family: "gemini-3.5-flash", tier: "agent" },
+};
+
+/** Check order matters: `-extra-low` must be tested before `-low`. */
+const RUNTIME_SUFFIXES = ["-extra-low", "-thinking", "-medium", "-high", "-agent", "-low"] as const;
+
+function classifyRuntimeId(modelId: string): { family: string; tier: RuntimeTier } | undefined {
+  const quirk = AGENT_QUIRKS[modelId];
+  if (quirk) return quirk;
+  for (const suffix of RUNTIME_SUFFIXES) {
+    if (modelId.endsWith(suffix) && modelId.length > suffix.length) {
+      return { family: modelId.slice(0, -suffix.length), tier: suffix.slice(1) as RuntimeTier };
+    }
+  }
+  if (/^(gemini|claude|gpt-oss)/i.test(modelId)) return { family: modelId, tier: "none" };
+  return undefined;
+}
+
+/**
+ * Pi thinking level for a runtime tier within its family. Families advertising
+ * `extra-low` shift the ladder down one (extra-low=low, low=medium, medium=high),
+ * matching the curated gemini-3.5-flash mapping.
+ */
+function piLevelForTier(
+  tier: RuntimeTier,
+  tiers: ReadonlyMap<RuntimeTier, unknown>,
+): ThinkingEffort | undefined {
+  if (tier === "agent" || tier === "thinking" || tier === "none") return ThinkingEffort.High;
+  if (tiers.has("extra-low")) {
+    if (tier === "extra-low") return ThinkingEffort.Low;
+    if (tier === "low") return ThinkingEffort.Medium;
+    if (tier === "medium") return ThinkingEffort.High;
+    return undefined;
+  }
+  if (tier === "low") return ThinkingEffort.Low;
+  if (tier === "medium") return ThinkingEffort.Medium;
+  if (tier === "high") return ThinkingEffort.High;
+  return undefined;
+}
+
+function prettyFamilyName(family: string): string {
+  const acronyms = new Set(["gpt", "oss"]);
+  return family
+    .split(/[-_]/)
+    .map((part) =>
+      acronyms.has(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
+    )
+    .join(" ");
+}
+
+function defaultContextWindow(family: string): number {
+  if (family.startsWith("claude-opus")) return 250_000;
+  if (family.startsWith("claude")) return 200_000;
+  if (family.startsWith("gpt-oss")) return 131_072;
+  return 1_048_576; // gemini and unknown families
+}
+
+const LEVEL_ORDER: ThinkingEffort[] = [
+  ThinkingEffort.Low,
+  ThinkingEffort.Medium,
+  ThinkingEffort.High,
+];
+
+/**
+ * Merge a live runtime catalog into the registered model list. Returns the full
+ * list to register (static + newly derived); never empty, never undefined — an
+ * empty refresh would wipe the picker. Updates derived routing in place.
+ */
+export function applyDerivedModels(rows: ModelQuotaRow[]): ProviderModelConfig[] {
+  const families = new Map<
+    string,
+    {
+      tiers: Map<RuntimeTier, string>;
+      supportsImages: boolean;
+      supportsThinking: boolean;
+    }
+  >();
+
+  for (const row of rows) {
+    if (/tab_|chat_/i.test(row.modelId)) continue;
+    const classified = classifyRuntimeId(row.modelId);
+    if (!classified) continue;
+    // Image-generation variants are not chat models.
+    if (classified.family.endsWith("-image")) continue;
+    // Curated static routing wins; derivation only registers unknown families.
+    if (ANTIGRAVITY_ROUTING[classified.family]) continue;
+    // Skip rollout-era runtime variants of static families (e.g. gemini-3.7-flash-tiered).
+    if (
+      Object.keys(ANTIGRAVITY_ROUTING).some(
+        (id) => classified.family !== id && classified.family.startsWith(`${id}-`),
+      )
+    ) {
+      continue;
+    }
+
+    let entry = families.get(classified.family);
+    if (!entry) {
+      entry = { tiers: new Map(), supportsImages: false, supportsThinking: false };
+      families.set(classified.family, entry);
+    }
+    if (!entry.tiers.has(classified.tier)) entry.tiers.set(classified.tier, row.modelId);
+    entry.supportsImages ||= row.supportsImages ?? false;
+    entry.supportsThinking ||= row.supportsThinking ?? false;
+  }
+
+  const newModels: ProviderModelConfig[] = [];
+  for (const [family, entry] of families) {
+    if (derivedRouting[family]) continue; // already registered by an earlier refresh
+
+    const levels = new Map<ThinkingEffort, string>();
+    // Tier priority resolves High-level collisions: explicit thinking/agent runtimes
+    // beat the unsuffixed base id (e.g. gemini-2.5-flash-thinking > gemini-2.5-flash).
+    for (const tier of [
+      "agent",
+      "thinking",
+      "none",
+      "extra-low",
+      "low",
+      "medium",
+      "high",
+    ] as RuntimeTier[]) {
+      const runtimeId = entry.tiers.get(tier);
+      if (!runtimeId) continue;
+      const level = piLevelForTier(tier, entry.tiers);
+      if (level && !levels.has(level)) levels.set(level, runtimeId);
+    }
+    if (!levels.size) continue;
+
+    const lowestRuntime =
+      LEVEL_ORDER.map((level) => levels.get(level)).find((id) => id !== undefined) ??
+      [...levels.values()][0];
+
+    const levelMap: ProviderModelConfig["thinkingLevelMap"] = {
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    };
+    const routing: AntigravityRouting["routing"] = {};
+    if (entry.supportsThinking) {
+      for (const [level, runtimeId] of levels) {
+        levelMap[level] =
+          level === ThinkingEffort.Low
+            ? "low"
+            : level === ThinkingEffort.Medium
+              ? "medium"
+              : "high";
+        routing[level] = runtimeId;
+      }
+    }
+
+    derivedRouting[family] = {
+      off: lowestRuntime,
+      routing,
+      defaultRequestId: lowestRuntime,
+    };
+
+    newModels.push({
+      id: family,
+      // Catalog displayNames can be stale on the daily endpoint; derive from the id.
+      name: `${prettyFamilyName(family)} (Antigravity)`,
+      reasoning: entry.supportsThinking,
+      thinkingLevelMap: levelMap,
+      input: entry.supportsImages ? ["text", "image"] : ["text"],
+      cost: freeCost,
+      contextWindow: defaultContextWindow(family),
+      maxTokens: getMaxOutputTokens(family, lowestRuntime),
+    });
+  }
+
+  return newModels.length ? [...ANTIGRAVITY_MODELS, ...newModels] : ANTIGRAVITY_MODELS;
 }
 
 /**

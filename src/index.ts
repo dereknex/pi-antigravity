@@ -2,15 +2,23 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
+import type { RefreshModelsContext } from "@earendil-works/pi-ai";
 import { registerApiProvider } from "@earendil-works/pi-ai/compat";
 import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth/index.js";
 import { DEFAULT_ENDPOINT, endpointCandidates } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
-import { ANTIGRAVITY_MODELS, PROVIDER_ID, PROVIDER_NAME } from "./models/index.js";
+import {
+  ANTIGRAVITY_MODELS,
+  applyDerivedModels,
+  PROVIDER_ID,
+  PROVIDER_NAME,
+} from "./models/index.js";
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
 import {
   fetchAccountUsage,
+  fetchLiveModelRows,
   formatFooterStatus,
   formatModelsList,
   formatUsageSummary,
@@ -84,6 +92,34 @@ async function refreshFooterUsage(ctx: ExtensionContext): Promise<void> {
   }
 }
 
+/**
+ * Live model catalog sync: derive unknown model families from the backend
+ * `fetchAvailableModels` catalog and return the full list to register. Framework
+ * contract: always resolve to a non-empty array (an empty refresh would wipe the
+ * picker). Offline / unauthenticated / backend failure → static catalog.
+ */
+async function refreshLiveModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
+  if (!context.allowNetwork || !context.credential) return ANTIGRAVITY_MODELS;
+  try {
+    const credential = context.credential;
+    const apiKey =
+      credential.type === "oauth" ? getApiKey(credential) : (credential.key ?? undefined);
+    if (!apiKey) return ANTIGRAVITY_MODELS;
+    const rows = await fetchLiveModelRows(apiKey);
+    return applyDerivedModels(rows);
+  } catch {
+    return ANTIGRAVITY_MODELS;
+  }
+}
+
+async function refreshModelRegistry(ctx: ExtensionContext): Promise<void> {
+  try {
+    await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID] });
+  } catch {
+    // Best-effort sync; /antigravity.models shows live catalog state on demand.
+  }
+}
+
 export default function (pi: ExtensionAPI): void {
   // Open the TLS connection up front so the first message of a session does not pay
   // the handshake. Opt out with ANTIGRAVITY_NO_PREWARM=1.
@@ -101,6 +137,7 @@ export default function (pi: ExtensionAPI): void {
     baseUrl: DEFAULT_ENDPOINT,
     api: ANTIGRAVITY_API,
     models: ANTIGRAVITY_MODELS,
+    refreshModels: refreshLiveModels,
     oauth: {
       name: PROVIDER_NAME,
       login: loginAntigravity,
@@ -113,6 +150,7 @@ export default function (pi: ExtensionAPI): void {
   // --- Footer usage display ---
   pi.on("session_start", (_event, ctx) => {
     void refreshFooterUsage(ctx);
+    void refreshModelRegistry(ctx);
   });
 
   pi.on("agent_settled", (_event, ctx) => {
@@ -135,6 +173,10 @@ export default function (pi: ExtensionAPI): void {
     description: "List Antigravity runtime models + remaining pool fraction",
     handler: async (args, ctx) => {
       const all = /\ball\b/i.test(args || "");
+      if (/\bsync\b/i.test(args || "")) {
+        emitCommandOutput(ctx, "Syncing Antigravity model catalog…", "info");
+        await refreshModelRegistry(ctx);
+      }
       await withUsage(ctx, (usage) => formatModelsList(usage, { all }));
     },
   });

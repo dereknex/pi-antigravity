@@ -314,6 +314,17 @@ async function fetchQuotaSummarySafe(token: string): Promise<
   }
 }
 
+/**
+ * Live runtime catalog rows for model sync (`refreshModels`). Throws on failure —
+ * callers fall back to the static catalog.
+ */
+export async function fetchLiveModelRows(apiKeyRaw: string): Promise<ModelQuotaRow[]> {
+  const creds = parseApiKey(apiKeyRaw);
+  const projectId = resolveProjectId({ token: creds.token, credentialProjectId: creds.projectId });
+  const available = await fetchMergedAvailableModels(creds.token, projectId);
+  return parseModels(available.data).models;
+}
+
 export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsage> {
   const creds = parseApiKey(apiKeyRaw);
   const initialProjectId =

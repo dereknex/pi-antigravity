@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic model catalog sync:** New model families advertised by the backend are now registered automatically — no code change needed. On session start (and via the new `/antigravity.models sync`) the extension fetches the live `fetchAvailableModels` catalog, derives public model IDs from unknown runtime families (tier suffixes → thinking levels, with an `extra-low` ladder shift and `-thinking`/`-agent` runtime priority), and merges them into the picker. The seven curated models keep their hand-tuned routing and act as the offline/failure fallback. Image-generation (`*-image`) and rollout-era variants of curated families are excluded.
+
 ## [0.5.2] - 2026-08-30
 
 ### Fixed
