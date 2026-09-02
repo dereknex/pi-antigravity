@@ -13,6 +13,8 @@ import {
   applyDerivedModels,
   PROVIDER_ID,
   PROVIDER_NAME,
+  readCachedModelRows,
+  writeCachedModelRows,
 } from "./models/index.js";
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
 import {
@@ -95,31 +97,29 @@ async function refreshFooterUsage(ctx: ExtensionContext): Promise<void> {
  * Live model catalog sync: derive unknown model families from the backend
  * `fetchAvailableModels` catalog and return the full list to register.
  *
- * Framework contract (pi-ai `Provider.refreshModels`): implementations must
- * RETAIN the previous list on offline phases and failures — the composer only
- * publishes when the return value is truthy, so returning undefined is the
- * blessed no-op. Republishing the static baseline on every offline refresh
- * (provider re-registration, credential sync) would wipe previously derived
- * models — exactly why backend models that synced once disappeared again.
+ * Framework contract (pi-ai `Provider.refreshModels`): offline phases restore
+ * the previously synced catalog from the local cache; the composer publishes
+ * truthy return values and skips undefined (no-op). Successful rows persist to
+ * the cache so derived models survive restarts and provider re-registration
+ * (recompose clears the composer's in-memory list, offline restore refills it).
  *
- * Network fetch runs only when the framework allows it and a credential is
- * available; online failure keeps the current list and is reported via the
- * refresh result's errors map (surfaced by /antigravity.models sync).
+ * Online failures THROW so the framework records them in the refresh result's
+ * errors map (surfaced as a warning by /antigravity.models sync); the in-memory
+ * list from the offline restore stays intact — pi-ai's "retain on failure".
  */
 async function refreshLiveModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
-  if (!context.allowNetwork || !context.credential) {
-    return undefined as unknown as ProviderModelConfig[];
+  if (!context.credential) return undefined as unknown as ProviderModelConfig[];
+  if (!context.allowNetwork) {
+    const cached = readCachedModelRows();
+    return cached ? applyDerivedModels(cached) : (undefined as unknown as ProviderModelConfig[]);
   }
-  try {
-    const credential = context.credential;
-    const apiKey =
-      credential.type === "oauth" ? getApiKey(credential) : (credential.key ?? undefined);
-    if (!apiKey) return undefined as unknown as ProviderModelConfig[];
-    const rows = await fetchLiveModelRows(apiKey);
-    return applyDerivedModels(rows);
-  } catch {
-    return undefined as unknown as ProviderModelConfig[];
-  }
+  const credential = context.credential;
+  const apiKey =
+    credential.type === "oauth" ? getApiKey(credential) : (credential.key ?? undefined);
+  if (!apiKey) return undefined as unknown as ProviderModelConfig[];
+  const rows = await fetchLiveModelRows(apiKey);
+  writeCachedModelRows(rows);
+  return applyDerivedModels(rows);
 }
 
 async function refreshModelRegistry(ctx: ExtensionContext): Promise<void> {

@@ -1,6 +1,9 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AntigravityRouting, ModelQuotaRow } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Antigravity";
@@ -386,9 +389,36 @@ const LEVEL_ORDER: ThinkingEffort[] = [
 ];
 
 /**
+ * Cached raw catalog rows so derived models survive restarts, provider
+ * re-registration, and offline refreshes. The cache stores backend rows (not
+ * derived configs): static models always come from code, and applyDerivedModels
+ * rebuilds routing consistently for restore and prune.
+ */
+const CATALOG_CACHE_PATH = join(homedir(), ".pi", "agent", "antigravity-models-cache.json");
+
+export function readCachedModelRows(): ModelQuotaRow[] | undefined {
+  try {
+    if (!existsSync(CATALOG_CACHE_PATH)) return undefined;
+    const parsed = JSON.parse(readFileSync(CATALOG_CACHE_PATH, "utf8"));
+    if (Array.isArray(parsed?.rows) && parsed.rows.length > 0) return parsed.rows;
+  } catch {
+    // corrupt cache: fall through to no restore
+  }
+  return undefined;
+}
+
+export function writeCachedModelRows(rows: ModelQuotaRow[]): void {
+  try {
+    writeFileSync(CATALOG_CACHE_PATH, JSON.stringify({ cachedAt: Date.now(), rows }, null, 2));
+  } catch {
+    // best-effort cache
+  }
+}
+
+/**
  * Merge a live runtime catalog into the registered model list. Returns the full
- * list to register (static + newly derived); never empty, never undefined — an
- * empty refresh would wipe the picker. Updates derived routing in place.
+ * list to register (static + derived) on every call, and prunes derived routing
+ * for families that have disappeared from the catalog.
  */
 export function applyDerivedModels(rows: ModelQuotaRow[]): ProviderModelConfig[] {
   const families = new Map<
@@ -427,10 +457,13 @@ export function applyDerivedModels(rows: ModelQuotaRow[]): ProviderModelConfig[]
     entry.supportsThinking ||= row.supportsThinking ?? false;
   }
 
-  const newModels: ProviderModelConfig[] = [];
-  for (const [family, entry] of families) {
-    if (derivedRouting[family]) continue; // already registered by an earlier refresh
+  // Prune families that are no longer advertised so the picker reflects the live catalog.
+  for (const family of Object.keys(derivedRouting)) {
+    if (!families.has(family)) delete derivedRouting[family];
+  }
 
+  const derivedModels: ProviderModelConfig[] = [];
+  for (const [family, entry] of families) {
     const levels = new Map<ThinkingEffort, string>();
     // Tier priority resolves High-level collisions: explicit thinking/agent runtimes
     // beat the unsuffixed base id (e.g. gemini-2.5-flash-thinking > gemini-2.5-flash).
@@ -482,7 +515,7 @@ export function applyDerivedModels(rows: ModelQuotaRow[]): ProviderModelConfig[]
       defaultRequestId: lowestRuntime,
     };
 
-    newModels.push({
+    derivedModels.push({
       id: family,
       // Catalog displayNames can be stale on the daily endpoint; derive from the id.
       name: `${prettyFamilyName(family)} (Antigravity)`,
@@ -495,7 +528,7 @@ export function applyDerivedModels(rows: ModelQuotaRow[]): ProviderModelConfig[]
     });
   }
 
-  return newModels.length ? [...ANTIGRAVITY_MODELS, ...newModels] : ANTIGRAVITY_MODELS;
+  return [...ANTIGRAVITY_MODELS, ...derivedModels];
 }
 
 /**
@@ -551,6 +584,19 @@ export function getThinkingConfig(
     return { includeThoughts: true, thinkingBudget };
   }
   if (modelId === "gemini-3.1-pro") {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    return {
+      includeThoughts: true,
+      thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
+    };
+  }
+  // Generic fallback for derived/future Gemini families so new catalog entries
+  // get thinking controls without a code change.
+  if (/^gemini-\d+\.\d+-flash/.test(modelId)) {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
+  }
+  if (/^gemini-\d+\.\d+-pro/.test(modelId)) {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     return {
       includeThoughts: true,

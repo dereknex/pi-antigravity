@@ -46,7 +46,11 @@ const knownCatalog = [
   "claude-sonnet-4-6",
   "gpt-oss-120b-medium",
 ].map((modelId) => row(modelId, { supportsThinking: true, supportsImages: true }));
-assert.equal(applyDerivedModels(knownCatalog), ANTIGRAVITY_MODELS, "known catalog must not add families");
+assert.deepEqual(
+  applyDerivedModels(knownCatalog).map((m) => m.id),
+  ANTIGRAVITY_MODELS.map((m) => m.id),
+  "known catalog must not add families",
+);
 
 // 2. A new Gemini family is derived with tier-based thinking levels and routing.
 const newFamilyCatalog = [
@@ -95,11 +99,74 @@ const unsuffixed = applyDerivedModels([
 assert.equal(getAntigravityRequestModelId("claude-haiku-5", "off"), "claude-haiku-5");
 assert.equal(getAntigravityRequestModelId("claude-haiku-5", "high"), "claude-haiku-5");
 
-// 5. Idempotent: a second pass with the same rows adds nothing new.
-assert.equal(
-  applyDerivedModels(newFamilyCatalog),
-  ANTIGRAVITY_MODELS,
-  "repeat refresh with same catalog must not duplicate",
+// 5. Repeated refresh returns the full list, keeps derived families, and never duplicates.
+const repeat = applyDerivedModels(newFamilyCatalog);
+assert.ok(repeat.some((m) => m.id === "gemini-4.0-flash-lite"), "repeat refresh keeps derived family");
+const repeatIds = repeat.map((m) => m.id);
+assert.equal(new Set(repeatIds).size, repeatIds.length, "repeat refresh must not duplicate models");
+assert.ok(
+  !repeat.some((m) => m.id === "gemini-5.0-flash"),
+  "stale families from earlier refreshes must be removed",
+);
+assert.ok(
+  !repeat.some((m) => m.id === "claude-haiku-5"),
+  "stale families from earlier refreshes must be removed",
+);
+
+// 6. When a derived family disappears from the catalog it is dropped from routing too.
+const backToKnown = applyDerivedModels(knownCatalog);
+assert.ok(
+  !backToKnown.some((m) => m.id === "gemini-4.0-flash-lite"),
+  "removed derived family must disappear from the list",
+);
+assert.ok(
+  !isKnownAntigravityModel("gemini-4.0-flash-lite"),
+  "removed derived family must no longer be known",
 );
 
 console.log("model sync: derivation, filtering, routing, and idempotency passed");
+
+// 7. Catalog row cache: write → read round-trip, corrupt file, and derived restore.
+//    Cache lives at ~/.pi/agent/antigravity-models-cache.json; tests must not
+//    clobber a real one, so they back it up and restore it.
+import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { readCachedModelRows, writeCachedModelRows } from "../src/models/index.js";
+
+const realCache = join(homedir(), ".pi", "agent", "antigravity-models-cache.json");
+const backup = `${realCache}.test-backup`;
+const hadReal = existsSync(realCache);
+if (hadReal) cpSync(realCache, backup);
+try {
+  writeCachedModelRows(newFamilyCatalog as never[]);
+  const restored = readCachedModelRows();
+  assert.deepEqual(restored?.map((r) => r.modelId), newFamilyCatalog.map((r) => r.modelId), "cache round-trip returns written rows");
+
+  // Corrupt cache must not crash the reader.
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(realCache, "{not json");
+  assert.equal(readCachedModelRows(), undefined, "corrupt cache reads as undefined");
+
+  // Offline restore rebuilds the full derived list from cached rows.
+  rmSync(realCache);
+  assert.equal(readCachedModelRows(), undefined, "missing cache reads as undefined");
+
+  writeCachedModelRows(newFamilyCatalog as never[]);
+  const rebuilt = applyDerivedModels(readCachedModelRows() ?? []);
+  assert.ok(rebuilt.some((m) => m.id === "gemini-4.0-flash-lite"), "cached rows rebuild derived families");
+  assert.equal(
+    rebuilt.filter((m) => ANTIGRAVITY_MODELS.some((s) => s.id === m.id)).length,
+    ANTIGRAVITY_MODELS.length,
+    "cached rows rebuild the static baseline alongside derived families",
+  );
+} finally {
+  if (hadReal) {
+    cpSync(backup, realCache);
+    rmSync(backup);
+  } else if (existsSync(realCache)) {
+    rmSync(realCache);
+  }
+}
+
+console.log("model sync: cache restore behavior passed");
