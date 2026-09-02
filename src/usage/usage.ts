@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   antigravityHeaders,
   endpointCandidates,
@@ -503,7 +503,7 @@ export function formatModelsList(usage: AccountUsage, opts?: { all?: boolean }):
 }
 
 export async function resolveApiKeyFromContext(
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
 ): Promise<string | undefined> {
   try {
     return await ctx.modelRegistry.getApiKeyForProvider("antigravity");

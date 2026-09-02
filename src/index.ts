@@ -1,6 +1,5 @@
 import type {
   ExtensionAPI,
-  ExtensionCommandContext,
   ExtensionContext,
   ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
@@ -31,7 +30,7 @@ import { prewarmConnection, redactSecrets } from "./utils/index.js";
  * mode prints to the raw terminal and paints over the TUI. Use one channel only.
  */
 function emitCommandOutput(
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   text: string,
   type: "info" | "warning" | "error" = "info",
 ): void {
@@ -44,7 +43,7 @@ function emitCommandOutput(
 }
 
 async function withUsage(
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   fn: (usage: Awaited<ReturnType<typeof fetchAccountUsage>>) => string,
 ): Promise<void> {
   try {
@@ -94,29 +93,45 @@ async function refreshFooterUsage(ctx: ExtensionContext): Promise<void> {
 
 /**
  * Live model catalog sync: derive unknown model families from the backend
- * `fetchAvailableModels` catalog and return the full list to register. Framework
- * contract: always resolve to a non-empty array (an empty refresh would wipe the
- * picker). Offline / unauthenticated / backend failure → static catalog.
+ * `fetchAvailableModels` catalog and return the full list to register.
+ *
+ * Framework contract (pi-ai `Provider.refreshModels`): implementations must
+ * RETAIN the previous list on offline phases and failures — the composer only
+ * publishes when the return value is truthy, so returning undefined is the
+ * blessed no-op. Republishing the static baseline on every offline refresh
+ * (provider re-registration, credential sync) would wipe previously derived
+ * models — exactly why backend models that synced once disappeared again.
+ *
+ * Network fetch runs only when the framework allows it and a credential is
+ * available; online failure keeps the current list and is reported via the
+ * refresh result's errors map (surfaced by /antigravity.models sync).
  */
 async function refreshLiveModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
-  if (!context.allowNetwork || !context.credential) return ANTIGRAVITY_MODELS;
+  if (!context.allowNetwork || !context.credential) {
+    return undefined as unknown as ProviderModelConfig[];
+  }
   try {
     const credential = context.credential;
     const apiKey =
       credential.type === "oauth" ? getApiKey(credential) : (credential.key ?? undefined);
-    if (!apiKey) return ANTIGRAVITY_MODELS;
+    if (!apiKey) return undefined as unknown as ProviderModelConfig[];
     const rows = await fetchLiveModelRows(apiKey);
     return applyDerivedModels(rows);
   } catch {
-    return ANTIGRAVITY_MODELS;
+    return undefined as unknown as ProviderModelConfig[];
   }
 }
 
 async function refreshModelRegistry(ctx: ExtensionContext): Promise<void> {
   try {
-    await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID] });
-  } catch {
-    // Best-effort sync; /antigravity.models shows live catalog state on demand.
+    const result = await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID] });
+    const error = result.errors.get(PROVIDER_ID);
+    if (error) {
+      emitCommandOutput(ctx, `Antigravity model sync failed: ${redactSecrets(error.message)}`, "warning");
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    emitCommandOutput(ctx, `Antigravity model sync failed: ${redactSecrets(msg)}`, "warning");
   }
 }
 
