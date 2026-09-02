@@ -23,7 +23,7 @@
 
 - Pi Coding Agent and Pi AI version **0.80.0 or later**
 - A Google account that can use the relevant Cloud Code Assist / Antigravity services
-- A browser on the same machine as Pi, for the OAuth sign-in flow
+- A browser to complete the Google sign-in. Same-machine is best (the browser hits the local callback automatically); on a remote/headless machine, complete sign-in anywhere and paste the resulting callback URL back into Pi (see [Troubleshooting](#troubleshooting)).
 
 ## Install
 
@@ -98,17 +98,17 @@ The static model IDs registered by this extension match the Antigravity CLI cata
 
 Antigravity / Cloud Code Assist exposes a multi-provider catalog. Depending on your account, its Google-authenticated API can advertise Google Gemini models alongside Claude models served through Anthropic Vertex and GPT-OSS served through OpenAI Vertex. This extension intentionally exposes those advertised Claude and GPT-OSS models through the single `antigravity` provider; they are not separate Pi providers and do not use a separate Anthropic or OpenAI login.
 
-The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.7 Flash uses the single `gemini-3.7-flash-tiered` runtime and receives Low, Medium, or High through `generationConfig.thinkingConfig`; Gemini 3.6 Flash still uses separate effort-specific runtime IDs.
+The backend's display labels do not always match its runtime IDs. For example, `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, and `gemini-3-flash-agent` can be displayed as Gemini 3.5 Flash Low, Medium, and High. Gemini 3.6 and 3.7 Flash use per-effort runtime IDs and send `thinkingLevel`; Gemini 3.5 Flash and 3.1 Pro send `thinkingBudget`.
 
-| Public model ID     | Input       | Thinking levels shown | Max output tokens | Request routing                                                                                  |
-| ------------------- | ----------- | --------------------- | ----------------- | ------------------------------------------------------------------------------------------------ |
-| `gemini-3.7-flash`  | Text, image | Low, Medium, High     | 65,536            | `gemini-3.7-flash-tiered` + `thinkingLevel` Low/Medium/High                                      |
-| `gemini-3.6-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high` |
-| `gemini-3.5-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.5-flash-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent`     |
-| `gemini-3.1-pro`    | Text, image | Low, High             | 65,535            | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent`                                            |
-| `claude-sonnet-4-6` | Text, image | High                  | 64,000            | high → `claude-sonnet-4-6`                                                                       |
-| `claude-opus-4-6`   | Text, image | High                  | 64,000            | high → `claude-opus-4-6-thinking`                                                                |
-| `gpt-oss-120b`      | Text        | Medium                | 32,768            | medium → `gpt-oss-120b-medium`                                                                   |
+| Public model ID     | Input       | Thinking levels shown | Max output tokens | Request routing                                                                                    |
+| ------------------- | ----------- | --------------------- | ----------------- | -------------------------------------------------------------------------------------------------- |
+| `gemini-3.7-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.7-flash-low`; medium → `gemini-3.7-flash-medium`; high → `gemini-3.7-flash-high`   |
+| `gemini-3.6-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.6-flash-low`; medium → `gemini-3.6-flash-medium`; high → `gemini-3.6-flash-high`   |
+| `gemini-3.5-flash`  | Text, image | Low, Medium, High     | 65,536            | low → `gemini-3.5-flash-extra-low`; medium → `gemini-3.5-flash-low`; high → `gemini-3-flash-agent` |
+| `gemini-3.1-pro`    | Text, image | Low, High             | 65,535            | low → `gemini-3.1-pro-low`; high → `gemini-pro-agent`                                              |
+| `claude-sonnet-4-6` | Text, image | High                  | 64,000            | high → `claude-sonnet-4-6`                                                                         |
+| `claude-opus-4-6`   | Text, image | High                  | 64,000            | high → `claude-opus-4-6-thinking`                                                                  |
+| `gpt-oss-120b`      | Text        | Medium                | 32,768            | medium → `gpt-oss-120b-medium`                                                                     |
 
 To limit which models Pi cycles through, enable specific entries in `~/.pi/agent/settings.json`:
 
@@ -137,12 +137,21 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing normal static routing.                                             |
 | `ANTIGRAVITY_CLIENT_ID`     | Use a custom Google OAuth client ID.                                                                             |
 | `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history.                        |
+| `ANTIGRAVITY_NO_KEEPALIVE`  | Set to `1` to skip the keep-alive connection pool.                                                               |
+| `ANTIGRAVITY_NO_PREWARM`    | Set to `1` to skip the TLS pre-warm request made when the extension loads.                                       |
 
-By default, the provider tries `https://cloudcode-pa.googleapis.com` and then its Google sandbox fallback if necessary. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
+By default, the provider tries `https://daily-cloudcode-pa.googleapis.com`, then the sandbox host, then `https://cloudcode-pa.googleapis.com`. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
+
+### Latency
+
+Provider requests reuse a keep-alive connection pool when the runtime supports it, so consecutive turns do not repeat the DNS, TCP, and TLS handshake. When `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is set, that pool is skipped so Pi's proxy-aware dispatcher is used instead. The connection is also opened when the extension loads so the first message of a session skips the handshake too. For the lowest time-to-first-token, pick a fast runtime: `gemini-3.7-flash` with reasoning off routes to `gemini-3.7-flash-low` at thinking level `LOW`. Setting `ANTIGRAVITY_PROJECT_ID` also removes the project-discovery round-trip when credentials do not already carry a project ID.
 
 ## Troubleshooting
 
 - **No credentials / 401 / 403:** Run `/login antigravity` again, then check `/antigravity.doctor`.
+- **Remote/headless machine — browser can't reach `localhost:51121`:** The callback binds to loopback only, so a browser on another machine can't hit it. You have two options:
+  - **Paste (no extra setup):** Run `/login antigravity`, open the shown URL and complete Google sign-in in _any_ browser. When it redirects to `http://localhost:51121/oauth-callback?…` and fails to load, copy that full URL from the address bar and paste it into the prompt Pi shows. The code is single-use and expires quickly, so paste promptly.
+  - **SSH tunnel (reusable):** From the machine with the browser, run `ssh -N -L 51121:127.0.0.1:51121 <user>@<server>` and keep it open, then run `/login antigravity` on the server. The redirect to `localhost:51121` tunnels through to the local callback automatically.
 - **OAuth callback will not start:** Ensure port `51121` is free and `ANTIGRAVITY_CALLBACK_HOST` is a permitted loopback address.
 - **Model is unavailable:** Run `/antigravity.models`; availability is account- and service-dependent.
 - **Claude/GPT tool-call schema error:** Upgrade to the latest package release. The provider adapts Pi's JSON Schema tool definitions for the Cloud Code Assist custom-tool bridge.
@@ -151,9 +160,11 @@ By default, the provider tries `https://cloudcode-pa.googleapis.com` and then it
 
 ## Development
 
+This repo uses [Bun](https://bun.sh) for install, scripts, and CI. The published extension itself runs on Node (Pi's CLI).
+
 ```bash
-npm install
-npm run check
+bun install
+bun run check
 ```
 
 The package declares its Pi extension in `package.json` under `pi.extensions`. See the [Pi package documentation](https://pi.dev/docs/latest/packages) for package installation, manifest, and gallery conventions.

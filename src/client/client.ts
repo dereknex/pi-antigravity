@@ -13,11 +13,13 @@ import {
 import { assertSafeApiBaseUrl, safeError } from "../utils/security.js";
 import type { AntigravityApiKey, DynamicModelInfo } from "../types/types.js";
 import { antigravityEnv, asString, escapeRegExp, isRecord } from "../utils/util.js";
+import { antigravityFetch } from "../utils/http.js";
 
-export const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+export const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const ENDPOINT_FALLBACKS = [
   DEFAULT_ENDPOINT,
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
+  "https://cloudcode-pa.googleapis.com",
 ];
 
 const PROJECT_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -38,7 +40,7 @@ export function stableProjectId(seed: string): string {
   const bytes = createHash("sha1").update(`antigravity:${seed}`).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
@@ -58,11 +60,15 @@ export function endpointCandidates(): string[] {
   return explicit ? [assertSafeApiBaseUrl(explicit)] : ENDPOINT_FALLBACKS;
 }
 
+const DEFAULT_ANTIGRAVITY_VERSION = "2.8.0";
+const DEFAULT_ANTIGRAVITY_CL = "963137146";
+
 function defaultUserAgent(): string {
-  const os =
-    process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
-  const arch = process.arch === "x64" ? "amd64" : process.arch;
-  return `antigravity/1.15.8 ${os}/${arch}`;
+  const version = antigravityEnv("HUB_VERSION") || DEFAULT_ANTIGRAVITY_VERSION;
+  const cl = antigravityEnv("HUB_CL") || DEFAULT_ANTIGRAVITY_CL;
+  const os = antigravityEnv("HUB_OS") || "darwin";
+  const arch = antigravityEnv("HUB_ARCH") || "arm64";
+  return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`;
 }
 
 export function antigravityHeaders(token: string): Record<string, string> {
@@ -146,7 +152,7 @@ export function extractProjectId(data: unknown): string | undefined {
 async function listCloudAICompanionProjects(token: string): Promise<string | undefined> {
   for (const endpoint of endpointCandidates()) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:listCloudAICompanionProjects`, {
+      const res = await antigravityFetch(`${endpoint}/v1internal:listCloudAICompanionProjects`, {
         method: "POST",
         headers: antigravityHeaders(token),
         body: JSON.stringify({}),
@@ -314,7 +320,7 @@ async function fetchAvailableRuntimeModelUncached(
   // resolves the model, return immediately without waiting on slower sandbox endpoints.
   for (const endpoint of endpoints) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+      const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
         method: "POST",
         headers: antigravityHeaders(token),
         body,
@@ -390,7 +396,7 @@ async function loadCodeAssistUncached(token: string): Promise<string | undefined
 
   for (const endpoint of endpointCandidates()) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+      const res = await antigravityFetch(`${endpoint}/v1internal:loadCodeAssist`, {
         method: "POST",
         headers: antigravityHeaders(token),
         body,

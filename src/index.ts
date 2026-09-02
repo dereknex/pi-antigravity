@@ -3,8 +3,9 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { registerApiProvider } from "@earendil-works/pi-ai/compat";
 import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth/index.js";
-import { DEFAULT_ENDPOINT } from "./client/index.js";
+import { DEFAULT_ENDPOINT, endpointCandidates } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
 import { ANTIGRAVITY_MODELS, PROVIDER_ID, PROVIDER_NAME } from "./models/index.js";
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
@@ -15,7 +16,24 @@ import {
   formatUsageSummary,
   resolveApiKeyFromContext,
 } from "./usage/index.js";
-import { redactSecrets } from "./utils/index.js";
+import { prewarmConnection, redactSecrets } from "./utils/index.js";
+
+/**
+ * Pi's interactive `notify` writes into the chat transcript. `console.log` in that
+ * mode prints to the raw terminal and paints over the TUI. Use one channel only.
+ */
+function emitCommandOutput(
+  ctx: ExtensionCommandContext,
+  text: string,
+  type: "info" | "warning" | "error" = "info",
+): void {
+  if (ctx.hasUI) {
+    ctx.ui.notify(text, type);
+    return;
+  }
+  if (type === "warning" || type === "error") console.error(text);
+  else console.log(text);
+}
 
 async function withUsage(
   ctx: ExtensionCommandContext,
@@ -24,20 +42,19 @@ async function withUsage(
   try {
     const apiKey = await resolveApiKeyFromContext(ctx);
     if (!apiKey) {
-      const msg = "No Antigravity credentials. Run /login antigravity first.";
-      if (ctx.hasUI) ctx.ui.notify(msg, "warning");
-      else console.log(msg);
+      emitCommandOutput(
+        ctx,
+        "No Antigravity credentials. Run /login antigravity first.",
+        "warning",
+      );
       return;
     }
     if (ctx.hasUI) ctx.ui.notify("Fetching Antigravity usage…", "info");
     const usage = await runWithDiagnostics(() => fetchAccountUsage(apiKey));
-    const text = fn(usage);
-    if (ctx.hasUI) ctx.ui.notify(text, "info");
-    console.log(text);
+    emitCommandOutput(ctx, fn(usage));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (ctx.hasUI) ctx.ui.notify(`Antigravity usage failed: ${msg}`, "warning");
-    else console.error(msg);
+    emitCommandOutput(ctx, `Antigravity usage failed: ${msg}`, "warning");
   }
 }
 
@@ -68,6 +85,17 @@ async function refreshFooterUsage(ctx: ExtensionContext): Promise<void> {
 }
 
 export default function (pi: ExtensionAPI): void {
+  // Open the TLS connection up front so the first message of a session does not pay
+  // the handshake. Opt out with ANTIGRAVITY_NO_PREWARM=1.
+  const primaryEndpoint = endpointCandidates()[0];
+  if (primaryEndpoint) prewarmConnection(primaryEndpoint);
+
+  registerApiProvider({
+    api: ANTIGRAVITY_API,
+    stream: streamAntigravity,
+    streamSimple: streamAntigravity,
+  });
+
   pi.registerProvider(PROVIDER_ID, {
     name: PROVIDER_NAME,
     baseUrl: DEFAULT_ENDPOINT,
@@ -129,9 +157,7 @@ export default function (pi: ExtensionAPI): void {
         "runtimeCli=not-used",
         "commands=/antigravity.usage /antigravity.models /antigravity.doctor",
       ];
-      const text = lines.join("\n");
-      if (ctx.hasUI) ctx.ui.notify(`Antigravity doctor\n${text}`, "info");
-      console.log(text);
+      emitCommandOutput(ctx, `Antigravity doctor\n${lines.join("\n")}`);
     },
   });
 }

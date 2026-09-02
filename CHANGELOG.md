@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+## [0.5.2] - 2026-08-30
+
+### Fixed
+
+- **Node Pi CLI:** The extension no longer uses `Bun.*` APIs at load time. `pi` (Node) can load it again; OAuth, hashing, env, and HTTP go through Node/`fetch`/`undici`.
+
+## [0.5.1] - 2026-08-30
+
+### Fixed
+
+- **CI / publish:** Install Bun from the official script instead of `oven-sh/setup-bun`, which this repository's GitHub Actions allowlist rejects.
+
+## [0.5.0] - 2026-08-30
+
+### Changed
+
+- **Bun runtime:** The extension is Bun-only. OAuth uses `Bun.serve`, hashing uses `Bun.CryptoHasher`, HTTP uses Bun's `fetch` pool (no `undici`), and the toolchain is Bun. This works when Pi itself is running on Bun (the compiled `pi` binary). The npm-installed Node `pi` CLI will not load Bun APIs.
+- **Antigravity request shape:** Gemini 3.6/3.7 Flash use per-effort runtime IDs and `thinkingLevel`; 3.5 Flash and 3.1 Pro send `thinkingBudget`. Requests use the `antigravity/hub` user-agent, `daily-cloudcode-pa` first, default `VALIDATED` tool mode, and the `agent/<id>/<ts>/<trajectory>/<step>` request envelope.
+
+### Fixed
+
+- **Cross-provider tool history:** Unsigned Gemini 3+ function calls from other providers are replayed as text observations instead of triggering a `thought_signature` 400 (#22).
+- **Error stops:** Stream errors now keep the provider `finishReason` and skip aborted/errored assistant turns on replay (#23).
+- **Foreign thinking:** Thinking blocks from other models are dropped from Gemini history so they are not copied into the visible answer (#24).
+- **Tool images:** Image blocks on `toolResult` messages are sent as `inlineData` (#25).
+- **Prompt cache:** Fallback tool-call IDs no longer include `Date.now()`, so history stays byte-stable across turns (#26).
+- **Compat registry:** Register `antigravity-api` with `@earendil-works/pi-ai/compat` so plugins like `pi-condense` can stream Antigravity models (#29).
+
+## [0.4.1] - 2026-08-22
+
+### Fixed
+
+- **Proxy-aware requests:** When `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is set, skip the private keep-alive dispatcher so requests use Pi's proxy-aware global dispatcher instead of connecting around the proxy (#20).
+- **Command display:** `/antigravity.usage`, `/antigravity.models`, and `/antigravity.doctor` no longer `console.log` into the interactive TUI (which overwrote the editor and status chrome). Reports go through Pi's chat `notify` in interactive mode and stdout only in headless mode (#19).
+
+## [0.4.0] - 2026-08-22
+
+### Performance
+
+- **Keep-alive connection pool:** Provider requests now go through a long-lived `undici` dispatcher (60s idle keep-alive, 5 min max) so consecutive turns reuse one socket. Node's built-in fetch drops an idle socket after 4 seconds unless the server advertises a longer `Keep-Alive: timeout=`, and the Cloud Code Assist endpoint sends no such header, so every turn previously paid a fresh DNS + TCP + TLS handshake. Measured against the production endpoint with a 6 second gap between turns, median request-initiation time dropped from 97 ms to 30 ms. The dispatcher is scoped to this provider's own requests rather than installed globally, so it does not change HTTP behaviour for the rest of the host process. Disable with `ANTIGRAVITY_NO_KEEPALIVE=1`; opt into HTTP/2 with `ANTIGRAVITY_HTTP2=1`.
+- **Connection pre-warm:** The TLS connection to the primary endpoint is opened when the extension loads, so the first message of a session skips the handshake as well. Disable with `ANTIGRAVITY_NO_PREWARM=1`.
+- **Smaller request prefill:** Removed a duplicated copy of the Antigravity system instruction that was sent inside an `[ignore]` wrapper on every request, trimming 228 characters from every request body.
+
+### Changed
+
+- **SSE read buffer:** The streaming reader now advances a read offset and compacts its buffer once per network chunk instead of re-slicing it for every parsed line. This is a readability change, not a performance one: V8 represents the old `slice` as a sliced string rather than a copy, and benchmarking the two loops over a 1.6 MB response showed no meaningful difference.
+
+### Tests
+
+- Added `scripts/test-stream-sse.ts`, which replays a fixed SSE body at nine different chunk sizes (down to 1 byte) and asserts the parsed text, thinking, tool calls, usage, and emitted event sequence are identical for every chunk boundary.
+
 ## [0.3.1] - 2026-08-19
 
 ### Performance

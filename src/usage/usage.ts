@@ -14,6 +14,7 @@ import {
 } from "../diagnostics/diagnostics.js";
 import { isRecord } from "../utils/util.js";
 import { safeError } from "../utils/security.js";
+import { antigravityFetch } from "../utils/http.js";
 import type {
   AccountUsage,
   ApiErrorBody,
@@ -77,7 +78,7 @@ async function postJson(
   let lastErrorText = "";
   for (const endpoint of endpointCandidates()) {
     try {
-      const res = await fetch(`${endpoint}${path}`, {
+      const res = await antigravityFetch(`${endpoint}${path}`, {
         method: "POST",
         headers: jsonHeaders(token),
         body: JSON.stringify(body),
@@ -117,7 +118,7 @@ async function fetchAvailableModelsFromEndpoint(
   // `{}` and `{ project: projectId }` return byte-identical catalogs on this endpoint
   // (verified against the live backend) — one body is the full search space per host.
   try {
-    const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+    const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
       method: "POST",
       headers: jsonHeaders(token),
       body: JSON.stringify({ project: projectId }),
@@ -292,6 +293,27 @@ async function loadCodeAssistSafe(token: string) {
   }
 }
 
+/**
+ * The user-quota-summary RPC is gated behind a paid subscription: free-tier
+ * accounts get 403 SUBSCRIPTION_REQUIRED (#3501). It is best-effort diagnostics
+ * only — never let it block the rest of the account data (models, tier, project).
+ */
+async function fetchQuotaSummarySafe(token: string): Promise<
+  | { ok: true; result: { endpoint: string; status: number; data: unknown } }
+  | {
+      ok: false;
+      error: string;
+    }
+> {
+  try {
+    return { ok: true, result: await postJson("/v1internal:retrieveUserQuotaSummary", token, {}) };
+  } catch (error) {
+    const msg = safeError(error);
+    setLastError(msg);
+    return { ok: false, error: msg };
+  }
+}
+
 export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsage> {
   const creds = parseApiKey(apiKeyRaw);
   const initialProjectId =
@@ -303,9 +325,9 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
 
   // Fetch loadCodeAssist, quota summary, and available models all in parallel
   // to minimize command execution latency.
-  const [assistResult, summary, available] = await Promise.all([
+  const [assistResult, summaryRes, available] = await Promise.all([
     loadCodeAssistSafe(creds.token),
-    postJson("/v1internal:retrieveUserQuotaSummary", creds.token, {}),
+    fetchQuotaSummarySafe(creds.token),
     fetchMergedAvailableModels(creds.token, initialProjectId),
   ]);
 
@@ -318,7 +340,11 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
   });
   setLastProjectId(projectId);
 
-  const { groups, description } = parseQuotaSummary(summary.data);
+  const summary = summaryRes.ok ? summaryRes.result : null;
+  const quotaSummaryError = summaryRes.ok ? undefined : summaryRes.error;
+  const { groups, description } = summary
+    ? parseQuotaSummary(summary.data)
+    : { groups: [], description: undefined };
   const { models, defaultAgentModelId } = parseModels(available.data);
 
   const assistData = (isRecord(assistResult?.data) ? assistResult.data : {}) as LoadCodeAssistRaw;
@@ -335,16 +361,24 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
 
   return {
     projectId,
-    endpoint: summary.endpoint,
+    endpoint: summary?.endpoint ?? available.endpoint ?? assistResult?.endpoint,
     productTier,
     paidTier,
     planLabel,
     groups,
     groupDescription: description,
+    quotaSummaryError,
     models,
     defaultAgentModelId,
     fetchedAt: Date.now(),
   };
+}
+
+function quotaErrorNote(msg: string): string {
+  if (/SUBSCRIPTION_REQUIRED|#3501|(?:lack|missing).*license/i.test(msg)) {
+    return "Aggregate quota summary needs a paid subscription (free-tier can't use that endpoint). Per-model usage is still available via /antigravity.models.";
+  }
+  return `Aggregate quota summary unavailable: ${msg.slice(0, 160)}`;
 }
 
 export function formatUsageSummary(usage: AccountUsage): string {
@@ -353,7 +387,11 @@ export function formatUsageSummary(usage: AccountUsage): string {
   if (usage.planLabel) lines.push(usage.planLabel);
 
   if (!usage.groups.length) {
-    lines.push("No quota groups returned.");
+    if (usage.quotaSummaryError) {
+      lines.push(quotaErrorNote(usage.quotaSummaryError));
+    } else {
+      lines.push("No quota groups returned.");
+    }
     return lines.join("\n");
   }
 

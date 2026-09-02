@@ -13,12 +13,13 @@ export enum Platform {
   Linux = "LINUX",
 }
 
-export enum ToolChoice {
-  Auto = "auto",
-  None = "none",
-  Any = "any",
-  Required = "required",
-}
+export const ToolChoice = {
+  Auto: "auto",
+  None: "none",
+  Any: "any",
+  Required: "required",
+} as const;
+export type ToolChoice = (typeof ToolChoice)[keyof typeof ToolChoice];
 
 export enum GeminiToolCallingMode {
   None = "NONE",

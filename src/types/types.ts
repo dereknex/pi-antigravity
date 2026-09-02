@@ -36,6 +36,7 @@ export type DynamicModelInfo = {
 export type CallbackServer = {
   server: Server;
   waitForCode: () => Promise<{ code: string; state: string }>;
+  cleanup: () => void;
 };
 
 // Model Types
@@ -53,7 +54,7 @@ export type AntigravityStreamOptions = SimpleStreamOptions & {
   toolChoice?: ToolChoice;
 };
 
-export type GeminiTextPart = { text: string };
+export type GeminiTextPart = { text: string; thoughtSignature?: string };
 export type GeminiInlineDataPart = { inlineData: { mimeType: string; data: string } };
 export type GeminiThoughtPart = {
   thought: true;
@@ -104,9 +105,9 @@ export type GeminiGenerationConfig = {
   temperature?: number;
   maxOutputTokens?: number;
   thinkingConfig?: {
-    thinkingLevel?: "LOW" | "MEDIUM" | "HIGH";
-    thinkingBudget?: number;
     includeThoughts?: boolean;
+    thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+    thinkingBudget?: number;
   };
 };
 
@@ -120,6 +121,7 @@ export type GeminiRequestBody = {
   tools?: { functionDeclarations: GeminiFunctionDeclaration[] }[];
   toolConfig?: GeminiToolConfig;
   sessionId?: string;
+  labels?: Record<string, string>;
 };
 
 export type AntigravityGenerateRequest = {
@@ -221,6 +223,8 @@ export type AccountUsage = {
   planLabel?: string;
   groups: QuotaGroup[];
   groupDescription?: string;
+  /** Set when the (subscription-gated) quota-summary RPC was unavailable, e.g. free-tier SUBSCRIPTION_REQUIRED. */
+  quotaSummaryError?: string;
   models: ModelQuotaRow[];
   defaultAgentModelId?: string;
   fetchedAt: number;
