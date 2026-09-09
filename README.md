@@ -13,6 +13,7 @@
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Authentication and credential safety](#authentication-and-credential-safety)
+- [Multiple accounts](#multiple-accounts)
 - [Commands](#commands)
 - [Models and routing](#models-and-routing)
 - [Configuration](#configuration)
@@ -75,17 +76,58 @@ Signing in requests these Google OAuth scopes:
 
 Review these permissions before approving access. If your credentials expire or are revoked, just re-run `/login antigravity` to sign in again.
 
+## Multiple accounts
+
+Pi stores exactly one credential per provider ID, so this extension registers several
+Antigravity provider IDs — one per account slot. Slot 1 keeps the plain `antigravity`
+ID, and further slots are `antigravity-2`, `antigravity-3`, … Every slot shares the same
+implementation, endpoints, and model routing; only the Google credential differs.
+
+Sign in to a second account:
+
+```text
+/login antigravity-2
+```
+
+Models and the account's email appear immediately after login — no `/reload` needed. To
+switch the current session between accounts:
+
+```text
+/antigravity.account                  # list slots, sign-in state, and the active one
+/antigravity.account use 2            # switch to slot 2, keeping the current model
+/antigravity.account use work@gmail   # or match on the account email
+```
+
+`/model antigravity-2/gemini-3.7-flash` works too, and the switch takes effect on the next
+request. The footer prefixes non-primary accounts (`#2`) so it is clear which quota is being
+spent. Quota, entitlement, and the model catalog are per account, so each slot caches its own
+catalog (`~/.pi/agent/antigravity-models-cache.antigravity-2.json`; slot 1 keeps the original
+`antigravity-models-cache.json`).
+
+Slots you have not signed in to register no models, so they stay out of `/model` while
+remaining available to `/login`. Set `ANTIGRAVITY_ACCOUNTS` to change how many slots are
+registered (1–8, default 3).
+
+Two caveats:
+
+- After `/logout antigravity-2`, that slot's models stay listed until Pi restarts. Pi marks
+  them unavailable, so selecting one fails cleanly rather than sending a request.
+- Switching accounts does not migrate conversation state; it only changes which credential
+  and quota the next request uses.
+
 ## Commands
 
-| Command                         | Description                                                                                      |
-| ------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `/login antigravity`            | Sign in to Google and configure the provider.                                                    |
-| `/model antigravity/<model-id>` | Choose a registered Antigravity model.                                                           |
-| `/antigravity.usage`            | Show the server-reported shared quota groups and reset times.                                    |
-| `/antigravity.models`           | List available runtime models, used shared-pool quota, and capabilities.                         |
-| `/antigravity.models sync`      | Re-sync the model catalog from the backend, then list.                                           |
-| `/antigravity.models all`       | Include tab/chat models normally hidden from the model list.                                     |
-| `/antigravity.doctor`           | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
+| Command                                  | Description                                                                                      |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `/login antigravity`                     | Sign in to Google and configure the provider.                                                    |
+| `/model antigravity/<model-id>`          | Choose a registered Antigravity model.                                                           |
+| `/antigravity.account`                   | List the account slots, which are signed in, and which one this session is using.                |
+| `/antigravity.account use <slot\|email>` | Switch this session to another signed-in account, keeping the current model.                     |
+| `/antigravity.usage`                     | Show the server-reported shared quota groups and reset times.                                    |
+| `/antigravity.models`                    | List available runtime models, used shared-pool quota, and capabilities.                         |
+| `/antigravity.models sync`               | Re-sync the model catalog from the backend, then list.                                           |
+| `/antigravity.models all`                | Include tab/chat models normally hidden from the model list.                                     |
+| `/antigravity.doctor`                    | Show sanitized provider diagnostics, including the endpoint, status, and resolved runtime model. |
 
 Model availability, entitlement, quota groups, and resets are returned by the service and can differ by account. The quota percentage shown for a model can represent a shared pool, not a private per-model allowance.
 
@@ -135,6 +177,7 @@ All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_`
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `ANTIGRAVITY_BASE_URL`      | Override the API base URL. It must be HTTPS, contain no URL credentials, and target an allowed Google APIs host. |
 | `ANTIGRAVITY_PROJECT_ID`    | Use a specific Cloud Code Assist project ID instead of discovery or the stable account fallback.                 |
+| `ANTIGRAVITY_ACCOUNTS`      | How many account slots to register, 1–8 (default 3). See [Multiple accounts](#multiple-accounts).                |
 | `ANTIGRAVITY_CALLBACK_HOST` | Bind OAuth callback to `127.0.0.1`, `::1`, or `localhost` only. Defaults to `127.0.0.1`.                         |
 | `ANTIGRAVITY_USER_AGENT`    | Override the request user-agent.                                                                                 |
 | `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing normal static routing.                                             |
@@ -157,6 +200,7 @@ Provider requests reuse a keep-alive connection pool when the runtime supports i
   - **SSH tunnel (reusable):** From the machine with the browser, run `ssh -N -L 51121:127.0.0.1:51121 <user>@<server>` and keep it open, then run `/login antigravity` on the server. The redirect to `localhost:51121` tunnels through to the local callback automatically.
 - **OAuth callback will not start:** Ensure port `51121` is free and `ANTIGRAVITY_CALLBACK_HOST` is a permitted loopback address.
 - **Model is unavailable:** Run `/antigravity.models`; availability is account- and service-dependent.
+- **A second account shows no models:** Run `/login antigravity-2` (or the slot you want) and check `/antigravity.account`. Slots with no credential deliberately register no models.
 - **Claude/GPT tool-call schema error:** Upgrade to the latest package release. The provider adapts Pi's JSON Schema tool definitions for the Cloud Code Assist custom-tool bridge.
 - **Quota or rate limit:** Run `/antigravity.usage`. A `429` response usually indicates quota or rate limiting; changing models may still draw from the same shared pool.
 - **Need a safe diagnostic:** `/antigravity.doctor` redacts recognized secrets from its error output. Still review output before sharing it publicly.

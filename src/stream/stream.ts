@@ -45,6 +45,7 @@ import {
   isKnownAntigravityModel,
   PROVIDER_ID,
 } from "../models/models.js";
+import { isAntigravityProviderId } from "../accounts/accounts.js";
 import { redactSecrets, safeError } from "../utils/security.js";
 import {
   ANTIGRAVITY_API,
@@ -190,7 +191,9 @@ export function convertMessages(
       }
       const parts: GeminiPart[] = [];
       let sawToolCall = false;
-      const isSameModel = msg.provider === PROVIDER_ID && msg.model === model.id;
+      // Any Antigravity account slot talks to the same backend, so thought
+      // signatures stay reusable across an account switch mid-session.
+      const isSameModel = isAntigravityProviderId(msg.provider) && msg.model === model.id;
       const toolCalls = msg.content.filter((b): b is ToolCall => b.type === "toolCall");
       const firstCallHasSig =
         toolCalls.length > 0 && isValidThoughtSignature(toolCalls[0]?.thoughtSignature);
@@ -249,7 +252,7 @@ export function convertMessages(
         } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
           const isAntigravityMsg =
             !msg.provider ||
-            msg.provider === PROVIDER_ID ||
+            isAntigravityProviderId(msg.provider) ||
             msg.provider === ANTIGRAVITY_API ||
             String(msg.provider).startsWith("antigravity");
           const hasThinkingSignature = Boolean(block.thinkingSignature);
@@ -648,7 +651,8 @@ function createOutput(model: Model<Api>): AssistantMessage {
     role: "assistant",
     content: [],
     api: ANTIGRAVITY_API,
-    provider: PROVIDER_ID,
+    // Record the account slot the turn actually ran on, not the primary slot.
+    provider: model.provider || PROVIDER_ID,
     model: model.id,
     usage: {
       input: 0,

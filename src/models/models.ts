@@ -2,9 +2,10 @@ import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AntigravityRouting, ModelQuotaRow } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { agentDir } from "../utils/paths.js";
 
+/** Primary account slot. Additional slots are `antigravity-2`, `antigravity-3`, … */
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Antigravity";
 
@@ -393,23 +394,37 @@ const LEVEL_ORDER: ThinkingEffort[] = [
  * re-registration, and offline refreshes. The cache stores backend rows (not
  * derived configs): static models always come from code, and applyDerivedModels
  * rebuilds routing consistently for restore and prune.
+ *
+ * The catalog is per account (entitlement and advertised families differ), so
+ * every slot gets its own file. The primary slot keeps the legacy filename.
  */
-const CATALOG_CACHE_PATH = join(homedir(), ".pi", "agent", "antigravity-models-cache.json");
+export function catalogCachePath(providerId: string = PROVIDER_ID): string {
+  const suffix = providerId === PROVIDER_ID ? "" : `.${providerId}`;
+  return join(agentDir(), `antigravity-models-cache${suffix}.json`);
+}
 
-export function readCachedModelRows(): ModelQuotaRow[] | undefined {
+export function readCachedModelRows(providerId: string = PROVIDER_ID): ModelQuotaRow[] | undefined {
   try {
-    if (!existsSync(CATALOG_CACHE_PATH)) return undefined;
-    const parsed = JSON.parse(readFileSync(CATALOG_CACHE_PATH, "utf8"));
-    if (Array.isArray(parsed?.rows) && parsed.rows.length > 0) return parsed.rows;
+    const path = catalogCachePath(providerId);
+    if (!existsSync(path)) return undefined;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { rows?: unknown };
+    const rows = parsed?.rows;
+    if (Array.isArray(rows) && rows.length > 0) return rows as ModelQuotaRow[];
   } catch {
     // corrupt cache: fall through to no restore
   }
   return undefined;
 }
 
-export function writeCachedModelRows(rows: ModelQuotaRow[]): void {
+export function writeCachedModelRows(
+  rows: ModelQuotaRow[],
+  providerId: string = PROVIDER_ID,
+): void {
   try {
-    writeFileSync(CATALOG_CACHE_PATH, JSON.stringify({ cachedAt: Date.now(), rows }, null, 2));
+    writeFileSync(
+      catalogCachePath(providerId),
+      JSON.stringify({ cachedAt: Date.now(), rows }, null, 2),
+    );
   } catch {
     // best-effort cache
   }

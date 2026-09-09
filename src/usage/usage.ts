@@ -12,6 +12,7 @@ import {
   setLastProjectId,
   setLastStatus,
 } from "../diagnostics/diagnostics.js";
+import { PROVIDER_ID } from "../models/models.js";
 import { isRecord } from "../utils/util.js";
 import { safeError } from "../utils/security.js";
 import { antigravityFetch } from "../utils/http.js";
@@ -504,9 +505,10 @@ export function formatModelsList(usage: AccountUsage, opts?: { all?: boolean }):
 
 export async function resolveApiKeyFromContext(
   ctx: ExtensionContext,
+  providerId: string = PROVIDER_ID,
 ): Promise<string | undefined> {
   try {
-    return await ctx.modelRegistry.getApiKeyForProvider("antigravity");
+    return await ctx.modelRegistry.getApiKeyForProvider(providerId);
   } catch {
     return undefined;
   }
