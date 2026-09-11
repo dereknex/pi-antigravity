@@ -33,16 +33,16 @@
 Install from npm:
 
 ```bash
-pi install npm:pi-antigravity
+pi install npm:@dereknex/pi-antigravity
 ```
 
 Or install the latest repository version:
 
 ```bash
-pi install git:github.com/Rahularya01/pi-antigravity
+pi install git:github.com/dereknex/pi-antigravity
 ```
 
-Restart Pi (or run `/reload`) after installation. To update the npm package later, use `pi update npm:pi-antigravity`.
+Restart Pi (or run `/reload`) after installation. To update the npm package later, use `pi update npm:@dereknex/pi-antigravity`.
 
 ## Quick start
 
