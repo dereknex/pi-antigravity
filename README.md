@@ -12,7 +12,7 @@
 - [Requirements](#requirements)
 - [Install](#install)
 - [Quick start](#quick-start)
-- [Differences from upstream / 与上游差异](#differences-from-upstream--与上游差异)
+- [Differences from upstream](#differences-from-upstream)
 - [Authentication and credential safety](#authentication-and-credential-safety)
 - [Multiple accounts](#multiple-accounts)
 - [Usage and status bar display](#usage-and-status-bar-display)
@@ -56,23 +56,23 @@ Restart Pi (or run `/reload`) after installation. To update the npm package late
 
 4. Start working. If a request fails, run `/antigravity.doctor` for sanitized diagnostics.
 
-## Differences from Upstream / 与上游差异
+## Differences from upstream
 
 Compared to upstream [`Rahularya01/pi-antigravity`](https://github.com/Rahularya01/pi-antigravity), this fork introduces three major architectural and functional enhancements:
 
-| Feature                                          | Upstream (`Rahularya01/pi-antigravity`)                                                                         | This Fork (`pi-antigravity`)                                                                                                                                                                                                                                                             |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Dynamic Model Discovery**<br>(动态获取模型)    | Static hardcoded array of 7 models in code; new models or tier changes require code modifications and releases. | **Fully dynamic**: Automatically polls Google's `fetchAvailableModels` backend catalog, derives new model families and thinking level maps (`extra-low` / `low` / `medium` / `agent`), caches models to disk per slot, and supports manual catalog re-sync (`/antigravity.models sync`). |
-| **Usage & Status Bar**<br>(用量显示与状态栏控制) | Only supports basic text dump in `/antigravity.usage`.                                                          | **Live status bar footer** (`antigravity.quota`) with 5-hour and weekly quota percentages, auto-refreshing on turn end/model switch, visual reset countdowns, and configurable Opus display toggle (`ANTIGRAVITY_STATUS_SHOW_OPUS` / `antigravity.statusShowOpus`).                      |
-| **Multi-Account Slots**<br>(多账号支持)          | Single Google account slot only (`antigravity`).                                                                | **1–8 independent account slots** (`antigravity`, `antigravity-2`, ...) with separate OAuth tokens, isolated quota pools, per-account catalog cache files, status bar account tags, and quick account switching (`/antigravity.account use <slot\|email>`).                              |
+| Feature                     | Upstream (`Rahularya01/pi-antigravity`)                                                                         | This Fork (`pi-antigravity`)                                                                                                                                                                                                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Dynamic Model Discovery** | Static hardcoded array of 7 models in code; new models or tier changes require code modifications and releases. | **Fully dynamic**: Automatically polls Google's `fetchAvailableModels` backend catalog, derives new model families and thinking level maps (`extra-low` / `low` / `medium` / `agent`), caches models to disk per slot, and supports manual catalog re-sync (`/antigravity.models sync`). |
+| **Usage & Status Bar**      | Only supports basic text dump in `/antigravity.usage`.                                                          | **Live status bar footer** (`antigravity.quota`) with 5-hour and weekly quota percentages, auto-refreshing on turn end/model switch, visual reset countdowns, and configurable Opus display toggle (`ANTIGRAVITY_STATUS_SHOW_OPUS` / `antigravity.statusShowOpus`).                      |
+| **Multi-Account Slots**     | Single Google account slot only (`antigravity`).                                                                | **1–8 independent account slots** (`antigravity`, `antigravity-2`, ...) with separate OAuth tokens, isolated quota pools, per-account catalog cache files, status bar account tags, and quick account switching (`/antigravity.account use <slot\|email>`).                              |
 
-### 1. Dynamic Model Discovery & Derivation (动态获取模型)
+### 1. Dynamic Model Discovery & Derivation
 
 - **Backend Catalog Discovery**: Automatically queries the Google Cloud Code Assist `fetchAvailableModels` endpoint at session startup and on demand via `/antigravity.models sync`.
 - **Automatic Derivation (`applyDerivedModels`)**: When Google rolls out new model families (such as `gemini-3.8-flash` or new third-party models), the extension dynamically maps runtime tiers to Pi thinking levels, configures context windows and input modalities, and exposes them in `/model` without requiring an extension update.
 - **Offline Cache & Resilience**: Raw backend rows are persisted to `~/.pi/agent/antigravity-models-cache[.slot].json`. On offline restarts, models are restored instantly from disk cache. Background refresh failures gracefully retain existing models ("retain on failure").
 
-### 2. Live Quota & Status Bar Display (用量显示与状态栏控制)
+### 2. Live Quota & Status Bar Display
 
 - **Real-Time Status Bar**: Integrated directly into Pi's footer (`antigravity.quota`), showing 5-hour and weekly usage percentages (e.g. `Gemini 5h:17.2% w:6.2% · Opus 5h:99.3% w:34.2%`).
 - **Opus Usage Visibility Control**: You can toggle whether Claude / Opus / 3P quotas are displayed in the status bar:
@@ -80,7 +80,7 @@ Compared to upstream [`Rahularya01/pi-antigravity`](https://github.com/Rahularya
   - Via environment variable: `export ANTIGRAVITY_STATUS_SHOW_OPUS=false` (or `0` / `off` / `no`)
 - **Rich Quota Inspector**: `/antigravity.usage` displays visual progress bars, percentage used, and precise reset countdowns for Gemini and third-party quota buckets.
 
-### 3. Multi-Account Slots & Isolation (多账号支持)
+### 3. Multi-Account Slots & Isolation
 
 - **Slot Provisioning**: Register up to 8 slots (`antigravity`, `antigravity-2`, ..., `antigravity-8`) using `ANTIGRAVITY_ACCOUNTS` (default `3`).
 - **Quota & Credential Isolation**: Each slot signs in with its own Google account (`/login antigravity-2`) and draws from its own quota pool.

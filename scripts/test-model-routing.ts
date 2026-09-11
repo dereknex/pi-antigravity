@@ -94,7 +94,7 @@ const mockAccountUsage = {
   fetchedAt: Date.now(),
 };
 
-const footerStatus = formatFooterStatus(mockAccountUsage);
+const footerStatus = formatFooterStatus(mockAccountUsage, { showOpus: true });
 assert.ok(
   footerStatus.includes("Gemini 5h:17.2% w:6.2%"),
   `unexpected footer status: ${footerStatus}`,
@@ -102,6 +102,16 @@ assert.ok(
 assert.ok(
   footerStatus.includes("Opus 5h:99.3% w:34.2%"),
   `unexpected footer status: ${footerStatus}`,
+);
+
+const footerStatusNoOpus = formatFooterStatus(mockAccountUsage, { showOpus: false });
+assert.ok(
+  footerStatusNoOpus.includes("Gemini 5h:17.2% w:6.2%"),
+  `unexpected footer status: ${footerStatusNoOpus}`,
+);
+assert.ok(
+  !footerStatusNoOpus.includes("Opus"),
+  `unexpected footer status with Opus hidden: ${footerStatusNoOpus}`,
 );
 
 const routeCases: Array<[string, string | undefined, string]> = [
