@@ -1,7 +1,7 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AntigravityRouting, ModelQuotaRow } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentDir } from "../utils/paths.js";
 
@@ -421,6 +421,7 @@ export function writeCachedModelRows(
   providerId: string = PROVIDER_ID,
 ): void {
   try {
+    mkdirSync(agentDir(), { recursive: true });
     writeFileSync(
       catalogCachePath(providerId),
       JSON.stringify({ cachedAt: Date.now(), rows }, null, 2),

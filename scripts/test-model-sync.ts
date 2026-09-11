@@ -130,12 +130,16 @@ console.log("model sync: derivation, filtering, routing, and idempotency passed"
 //    Cache lives at ~/.pi/agent/antigravity-models-cache.json; tests must not
 //    clobber a real one, so they back it up and restore it.
 import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { readCachedModelRows, writeCachedModelRows } from "../src/models/index.js";
+import { dirname } from "node:path";
+import {
+  catalogCachePath,
+  readCachedModelRows,
+  writeCachedModelRows,
+} from "../src/models/index.js";
 
-const realCache = join(homedir(), ".pi", "agent", "antigravity-models-cache.json");
+const realCache = catalogCachePath();
 const backup = `${realCache}.test-backup`;
+mkdirSync(dirname(realCache), { recursive: true });
 const hadReal = existsSync(realCache);
 if (hadReal) cpSync(realCache, backup);
 try {
