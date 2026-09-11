@@ -1,3 +1,11 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Isolate test from developer's ~/.pi/agent/settings.json
+const fixtureDir = mkdtempSync(join(tmpdir(), "antigravity-routing-"));
+process.env.PI_CODING_AGENT_DIR = fixtureDir;
+
 import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
 import { defaultProjectId, stableProjectId } from "../src/client/index.js";
 import { StopReason } from "../src/types/enums.js";
@@ -94,7 +102,7 @@ const mockAccountUsage = {
   fetchedAt: Date.now(),
 };
 
-const footerStatus = formatFooterStatus(mockAccountUsage, { showOpus: true });
+const footerStatus = formatFooterStatus(mockAccountUsage, { showOpus: true, showReset: false });
 assert.ok(
   footerStatus.includes("Gemini 5h:17.2% w:6.2%"),
   `unexpected footer status: ${footerStatus}`,
@@ -104,7 +112,7 @@ assert.ok(
   `unexpected footer status: ${footerStatus}`,
 );
 
-const footerStatusNoOpus = formatFooterStatus(mockAccountUsage, { showOpus: false });
+const footerStatusNoOpus = formatFooterStatus(mockAccountUsage, { showOpus: false, showReset: false });
 assert.ok(
   footerStatusNoOpus.includes("Gemini 5h:17.2% w:6.2%"),
   `unexpected footer status: ${footerStatusNoOpus}`,
@@ -112,6 +120,12 @@ assert.ok(
 assert.ok(
   !footerStatusNoOpus.includes("Opus"),
   `unexpected footer status with Opus hidden: ${footerStatusNoOpus}`,
+);
+
+const footerStatusWithReset = formatFooterStatus(mockAccountUsage, { showOpus: false, showReset: true });
+assert.ok(
+  footerStatusWithReset.includes("Gemini 5h:17.2%"),
+  `unexpected footer status with reset: ${footerStatusWithReset}`,
 );
 
 const routeCases: Array<[string, string | undefined, string]> = [

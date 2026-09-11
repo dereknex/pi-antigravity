@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+### Minor Changes
+
+- **Hide Opus in status bar by default:** Status bar now defaults to displaying only Gemini quota to keep the footer compact. Opus/Claude quota can still be enabled via `statusShowOpus` in settings or `ANTIGRAVITY_STATUS_SHOW_OPUS`.
+- **Status bar reset countdown toggle:** Add `statusShowReset` in settings or `ANTIGRAVITY_STATUS_SHOW_RESET` environment variable to optionally display bucket reset countdowns in the status bar (e.g. `Gemini 5h:17.2%(3h 12m) w:6.2%(4d 8h)`).
+
 ## 0.6.0
 
 ### Minor Changes

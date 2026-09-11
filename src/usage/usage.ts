@@ -51,7 +51,7 @@ function progressBar(remaining?: number, width = 20): string {
   return `[${"#".repeat(filled)}${"-".repeat(width - filled)}]`;
 }
 
-function formatReset(resetTime?: string): string {
+export function formatReset(resetTime?: string): string {
   if (!resetTime) return "n/a";
   const ts = Date.parse(resetTime);
   if (!Number.isFinite(ts)) return resetTime;
@@ -444,9 +444,11 @@ export function getGroupShortLabel(groupName: string, bucketId?: string): string
 
 export interface FooterStatusOptions {
   showOpus?: boolean;
+  showReset?: boolean;
+  showResetTime?: boolean;
 }
 
-export function parseOpusConfigValue(val: unknown): boolean | undefined {
+export function parseBooleanConfigValue(val: unknown): boolean | undefined {
   if (typeof val === "boolean") return val;
   if (typeof val === "string") {
     const trimmed = val.trim().toLowerCase();
@@ -464,7 +466,31 @@ export function parseOpusConfigValue(val: unknown): boolean | undefined {
   return undefined;
 }
 
-export function parseOpusSettingFromFile(path: string): boolean | undefined {
+export const parseOpusConfigValue = parseBooleanConfigValue;
+
+const OPUS_CONFIG_KEYS = ["statusShowOpus", "showOpusUsage", "statusBarShowOpus", "showOpus"];
+
+const OPUS_ENV_KEYS = ["STATUS_SHOW_OPUS", "SHOW_OPUS_USAGE", "STATUS_BAR_SHOW_OPUS", "SHOW_OPUS"];
+
+const RESET_CONFIG_KEYS = [
+  "statusShowReset",
+  "statusShowResetTime",
+  "showResetTime",
+  "showReset",
+  "statusBarShowReset",
+  "statusBarShowResetTime",
+];
+
+const RESET_ENV_KEYS = [
+  "STATUS_SHOW_RESET",
+  "STATUS_SHOW_RESET_TIME",
+  "SHOW_RESET_TIME",
+  "SHOW_RESET",
+  "STATUS_BAR_SHOW_RESET",
+  "STATUS_BAR_SHOW_RESET_TIME",
+];
+
+export function parseSettingFromFile(path: string, keys: string[]): boolean | undefined {
   try {
     if (!existsSync(path)) return undefined;
     const raw: unknown = JSON.parse(readFileSync(path, "utf-8"));
@@ -472,33 +498,36 @@ export function parseOpusSettingFromFile(path: string): boolean | undefined {
 
     const ag = raw.antigravity;
     if (isRecord(ag)) {
-      const nested = parseOpusConfigValue(
-        ag.statusShowOpus ?? ag.showOpusUsage ?? ag.statusBarShowOpus ?? ag.showOpus,
-      );
-      if (nested !== undefined) return nested;
+      for (const key of keys) {
+        const val = parseBooleanConfigValue(ag[key]);
+        if (val !== undefined) return val;
+      }
     }
 
-    const flat = parseOpusConfigValue(
-      raw["antigravity.statusShowOpus"] ??
-        raw["antigravity.showOpusUsage"] ??
-        raw["antigravity.statusBarShowOpus"] ??
-        raw["antigravity.showOpus"],
-    );
-    if (flat !== undefined) return flat;
+    for (const key of keys) {
+      const val = parseBooleanConfigValue(raw[`antigravity.${key}`]);
+      if (val !== undefined) return val;
+    }
   } catch {
     // ignore read/parse errors
   }
   return undefined;
 }
 
+export function parseOpusSettingFromFile(path: string): boolean | undefined {
+  return parseSettingFromFile(path, OPUS_CONFIG_KEYS);
+}
+
+export function parseResetSettingFromFile(path: string): boolean | undefined {
+  return parseSettingFromFile(path, RESET_CONFIG_KEYS);
+}
+
 export function isStatusOpusEnabled(): boolean {
-  const envVal =
-    antigravityEnv("STATUS_SHOW_OPUS") ??
-    antigravityEnv("SHOW_OPUS_USAGE") ??
-    antigravityEnv("STATUS_BAR_SHOW_OPUS") ??
-    antigravityEnv("SHOW_OPUS");
-  const parsedEnv = parseOpusConfigValue(envVal);
-  if (parsedEnv !== undefined) return parsedEnv;
+  for (const envKey of OPUS_ENV_KEYS) {
+    const envVal = antigravityEnv(envKey);
+    const parsedEnv = parseBooleanConfigValue(envVal);
+    if (parsedEnv !== undefined) return parsedEnv;
+  }
 
   const projectSetting = parseOpusSettingFromFile(projectSettingsJsonPath());
   if (projectSetting !== undefined) return projectSetting;
@@ -506,13 +535,30 @@ export function isStatusOpusEnabled(): boolean {
   const globalSetting = parseOpusSettingFromFile(settingsJsonPath());
   if (globalSetting !== undefined) return globalSetting;
 
-  return true;
+  return false;
+}
+
+export function isStatusResetEnabled(): boolean {
+  for (const envKey of RESET_ENV_KEYS) {
+    const envVal = antigravityEnv(envKey);
+    const parsedEnv = parseBooleanConfigValue(envVal);
+    if (parsedEnv !== undefined) return parsedEnv;
+  }
+
+  const projectSetting = parseResetSettingFromFile(projectSettingsJsonPath());
+  if (projectSetting !== undefined) return projectSetting;
+
+  const globalSetting = parseResetSettingFromFile(settingsJsonPath());
+  if (globalSetting !== undefined) return globalSetting;
+
+  return false;
 }
 
 /** Compact single-line status for footer bar display. */
 export function formatFooterStatus(usage: AccountUsage, opts?: FooterStatusOptions): string {
   if (!usage.groups.length) return "Quota: n/a";
   const showOpus = opts?.showOpus ?? isStatusOpusEnabled();
+  const showReset = opts?.showReset ?? opts?.showResetTime ?? isStatusResetEnabled();
   const parts: string[] = [];
   for (const group of usage.groups) {
     const groupLabel = getGroupShortLabel(group.displayName, group.buckets[0]?.bucketId);
@@ -524,14 +570,18 @@ export function formatFooterStatus(usage: AccountUsage, opts?: FooterStatusOptio
     const weekly = group.buckets.find(
       (b) => b.window === "weekly" || b.bucketId.toLowerCase().includes("weekly"),
     );
+    const formatBucket = (prefix: string, bucket: QuotaBucket): string => {
+      const pct = `${prefix}:${usedPercent(bucket.remainingFraction) ?? "?"}%`;
+      if (!showReset) return pct;
+      const reset = formatReset(bucket.resetTime);
+      return reset && reset !== "n/a" ? `${pct}(${reset})` : pct;
+    };
     const shown: string[] = [];
-    if (fiveHour) shown.push(`5h:${usedPercent(fiveHour.remainingFraction) ?? "?"}%`);
-    if (weekly) shown.push(`w:${usedPercent(weekly.remainingFraction) ?? "?"}%`);
+    if (fiveHour) shown.push(formatBucket("5h", fiveHour));
+    if (weekly) shown.push(formatBucket("w", weekly));
     if (!shown.length) {
       const fallback = group.buckets[0];
-      shown.push(
-        `${fallback.window ?? fallback.displayName}:${usedPercent(fallback.remainingFraction) ?? "?"}%`,
-      );
+      shown.push(formatBucket(fallback.window ?? fallback.displayName, fallback));
     }
     parts.push(`${groupLabel} ${shown.join(" ")}`);
   }
