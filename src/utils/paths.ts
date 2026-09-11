@@ -18,3 +18,13 @@ export function agentDir(): string {
 export function authJsonPath(): string {
   return join(agentDir(), "auth.json");
 }
+
+/** Path to Pi's global settings file. */
+export function settingsJsonPath(): string {
+  return join(agentDir(), "settings.json");
+}
+
+/** Path to project-local settings file. */
+export function projectSettingsJsonPath(cwd: string = process.cwd()): string {
+  return join(cwd, ".pi", "settings.json");
+}

@@ -1,6 +1,6 @@
 {
   "name": "pi-antigravity",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Personal Antigravity / Cloud Code Assist provider for Pi Coding Agent",
   "author": "Rahul Arya",
   "license": "MIT",
@@ -39,6 +39,9 @@
     "test": "bun scripts/test-accounts.ts && bun scripts/test-model-sync.ts && bun scripts/test-model-routing.ts && bun scripts/test-usage-formatter.ts && bun scripts/test-stream-sse.ts && bun scripts/test-http-proxy.ts",
     "smoke:tools": "bun scripts/smoke-tool-schema.ts",
     "smoke:models": "bun scripts/smoke-all-models.mjs",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "changeset publish",
     "check": "bun run typecheck && bun run lint && bun run format:check && bun run security-check && bun run test"
   },
   "pi": {
@@ -51,6 +54,7 @@
     "@earendil-works/pi-coding-agent": ">=0.80.0"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.2",
     "@earendil-works/pi-ai": "^0.84.2",
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",

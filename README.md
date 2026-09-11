@@ -12,8 +12,10 @@
 - [Requirements](#requirements)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Differences from upstream / 与上游差异](#differences-from-upstream--与上游差异)
 - [Authentication and credential safety](#authentication-and-credential-safety)
 - [Multiple accounts](#multiple-accounts)
+- [Usage and status bar display](#usage-and-status-bar-display)
 - [Commands](#commands)
 - [Models and routing](#models-and-routing)
 - [Configuration](#configuration)
@@ -53,6 +55,37 @@ Restart Pi (or run `/reload`) after installation. To update the npm package late
    ```
 
 4. Start working. If a request fails, run `/antigravity.doctor` for sanitized diagnostics.
+
+## Differences from Upstream / 与上游差异
+
+Compared to upstream [`Rahularya01/pi-antigravity`](https://github.com/Rahularya01/pi-antigravity), this fork introduces three major architectural and functional enhancements:
+
+| Feature                                          | Upstream (`Rahularya01/pi-antigravity`)                                                                         | This Fork (`pi-antigravity`)                                                                                                                                                                                                                                                             |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Dynamic Model Discovery**<br>(动态获取模型)    | Static hardcoded array of 7 models in code; new models or tier changes require code modifications and releases. | **Fully dynamic**: Automatically polls Google's `fetchAvailableModels` backend catalog, derives new model families and thinking level maps (`extra-low` / `low` / `medium` / `agent`), caches models to disk per slot, and supports manual catalog re-sync (`/antigravity.models sync`). |
+| **Usage & Status Bar**<br>(用量显示与状态栏控制) | Only supports basic text dump in `/antigravity.usage`.                                                          | **Live status bar footer** (`antigravity.quota`) with 5-hour and weekly quota percentages, auto-refreshing on turn end/model switch, visual reset countdowns, and configurable Opus display toggle (`ANTIGRAVITY_STATUS_SHOW_OPUS` / `antigravity.statusShowOpus`).                      |
+| **Multi-Account Slots**<br>(多账号支持)          | Single Google account slot only (`antigravity`).                                                                | **1–8 independent account slots** (`antigravity`, `antigravity-2`, ...) with separate OAuth tokens, isolated quota pools, per-account catalog cache files, status bar account tags, and quick account switching (`/antigravity.account use <slot\|email>`).                              |
+
+### 1. Dynamic Model Discovery & Derivation (动态获取模型)
+
+- **Backend Catalog Discovery**: Automatically queries the Google Cloud Code Assist `fetchAvailableModels` endpoint at session startup and on demand via `/antigravity.models sync`.
+- **Automatic Derivation (`applyDerivedModels`)**: When Google rolls out new model families (such as `gemini-3.8-flash` or new third-party models), the extension dynamically maps runtime tiers to Pi thinking levels, configures context windows and input modalities, and exposes them in `/model` without requiring an extension update.
+- **Offline Cache & Resilience**: Raw backend rows are persisted to `~/.pi/agent/antigravity-models-cache[.slot].json`. On offline restarts, models are restored instantly from disk cache. Background refresh failures gracefully retain existing models ("retain on failure").
+
+### 2. Live Quota & Status Bar Display (用量显示与状态栏控制)
+
+- **Real-Time Status Bar**: Integrated directly into Pi's footer (`antigravity.quota`), showing 5-hour and weekly usage percentages (e.g. `Gemini 5h:17.2% w:6.2% · Opus 5h:99.3% w:34.2%`).
+- **Opus Usage Visibility Control**: You can toggle whether Claude / Opus / 3P quotas are displayed in the status bar:
+  - In `settings.json`: `"antigravity": { "statusShowOpus": false }`
+  - Via environment variable: `export ANTIGRAVITY_STATUS_SHOW_OPUS=false` (or `0` / `off` / `no`)
+- **Rich Quota Inspector**: `/antigravity.usage` displays visual progress bars, percentage used, and precise reset countdowns for Gemini and third-party quota buckets.
+
+### 3. Multi-Account Slots & Isolation (多账号支持)
+
+- **Slot Provisioning**: Register up to 8 slots (`antigravity`, `antigravity-2`, ..., `antigravity-8`) using `ANTIGRAVITY_ACCOUNTS` (default `3`).
+- **Quota & Credential Isolation**: Each slot signs in with its own Google account (`/login antigravity-2`) and draws from its own quota pool.
+- **Per-Account Catalog**: Because entitlements differ across Google accounts, each slot maintains its own isolated model cache file.
+- **Quick Switching**: Switch accounts seamlessly via `/antigravity.account use <slot|email>` or by selecting an account's model directly in `/model`. Non-primary accounts display an informative tag in the status bar (e.g. `#2 work`).
 
 ## Authentication and credential safety
 
@@ -115,6 +148,54 @@ Two caveats:
 - Switching accounts does not migrate conversation state; it only changes which credential
   and quota the next request uses.
 
+## Usage and status bar display
+
+The extension keeps you informed about your Google Cloud Code Assist quota consumption without interrupting your flow.
+
+### Status bar quota line
+
+When an Antigravity model is active, the footer status bar automatically shows the current account's quota consumption:
+
+```text
+Gemini 5h:17.2% w:6.2% · Opus 5h:99.3% w:34.2%
+```
+
+- **Account Tag**: Secondary account slots show a prefix such as `#2 ` or `#2 work `, so you always know which account is being charged.
+- **5h Window**: Rolling 5-hour quota consumption percentage.
+- **Weekly Window (`w:`)**: Rolling 7-day quota consumption percentage.
+- **Auto-Refresh**: Updated automatically at session start, turn end, model switch, and after `/antigravity.usage` or `/antigravity.models`.
+
+### Controlling Opus / 3P visibility in the status bar
+
+If you only want to track Gemini quota in your status bar and hide Claude/Opus usage, configure `statusShowOpus`:
+
+- In `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (project):
+  ```json
+  {
+    "antigravity": {
+      "statusShowOpus": false
+    }
+  }
+  ```
+- Or via environment variable:
+  ```bash
+  export ANTIGRAVITY_STATUS_SHOW_OPUS=false   # or 0 / off / no
+  ```
+
+### Detailed quota command (`/antigravity.usage`)
+
+Run `/antigravity.usage` to inspect full quota groups with visual progress bars and reset countdowns:
+
+```text
+Gemini Models
+  [==------------------] Five Hour Limit: 17.2% used · resets in 3h 12m
+  [=-------------------] Weekly Limit: 6.2% used · resets in 4d 8h
+
+Claude and GPT models
+  [====================] Five Hour Limit: 99.3% used · resets in 1h 45m
+  [=======-------------] Weekly Limit: 34.2% used · resets in 2d 14h
+```
+
 ## Commands
 
 | Command                                  | Description                                                                                      |
@@ -173,18 +254,19 @@ To limit which models Pi cycles through, enable specific entries in `~/.pi/agent
 
 All primary environment variables start with `ANTIGRAVITY_`. The legacy `NOAGY_` prefix is also accepted for compatibility.
 
-| Variable                    | Purpose                                                                                                          |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `ANTIGRAVITY_BASE_URL`      | Override the API base URL. It must be HTTPS, contain no URL credentials, and target an allowed Google APIs host. |
-| `ANTIGRAVITY_PROJECT_ID`    | Use a specific Cloud Code Assist project ID instead of discovery or the stable account fallback.                 |
-| `ANTIGRAVITY_ACCOUNTS`      | How many account slots to register, 1–8 (default 3). See [Multiple accounts](#multiple-accounts).                |
-| `ANTIGRAVITY_CALLBACK_HOST` | Bind OAuth callback to `127.0.0.1`, `::1`, or `localhost` only. Defaults to `127.0.0.1`.                         |
-| `ANTIGRAVITY_USER_AGENT`    | Override the request user-agent.                                                                                 |
-| `ANTIGRAVITY_RUNTIME_MODEL` | Pin requests to a runtime model ID, bypassing normal static routing.                                             |
-| `ANTIGRAVITY_CLIENT_ID`     | Use a custom Google OAuth client ID.                                                                             |
-| `ANTIGRAVITY_CLIENT_SECRET` | Use a custom Google OAuth client secret. Keep it out of source control and shell history.                        |
-| `ANTIGRAVITY_NO_KEEPALIVE`  | Set to `1` to skip the keep-alive connection pool.                                                               |
-| `ANTIGRAVITY_NO_PREWARM`    | Set to `1` to skip the TLS pre-warm request made when the extension loads.                                       |
+| Variable                       | Purpose                                                                                                                                                                                |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANTIGRAVITY_BASE_URL`         | Override the API base URL. It must be HTTPS, contain no URL credentials, and target an allowed Google APIs host.                                                                       |
+| `ANTIGRAVITY_PROJECT_ID`       | Use a specific Cloud Code Assist project ID instead of discovery or the stable account fallback.                                                                                       |
+| `ANTIGRAVITY_ACCOUNTS`         | How many account slots to register, 1–8 (default 3). See [Multiple accounts](#multiple-accounts).                                                                                      |
+| `ANTIGRAVITY_CALLBACK_HOST`    | Bind OAuth callback to `127.0.0.1`, `::1`, or `localhost` only. Defaults to `127.0.0.1`.                                                                                               |
+| `ANTIGRAVITY_USER_AGENT`       | Override the request user-agent.                                                                                                                                                       |
+| `ANTIGRAVITY_RUNTIME_MODEL`    | Pin requests to a runtime model ID, bypassing normal static routing.                                                                                                                   |
+| `ANTIGRAVITY_CLIENT_ID`        | Use a custom Google OAuth client ID.                                                                                                                                                   |
+| `ANTIGRAVITY_CLIENT_SECRET`    | Use a custom Google OAuth client secret. Keep it out of source control and shell history.                                                                                              |
+| `ANTIGRAVITY_NO_KEEPALIVE`     | Set to `1` to skip the keep-alive connection pool.                                                                                                                                     |
+| `ANTIGRAVITY_NO_PREWARM`       | Set to `1` to skip the TLS pre-warm request made when the extension loads.                                                                                                             |
+| `ANTIGRAVITY_STATUS_SHOW_OPUS` | Set to `0` or `false` to hide Opus usage in the status bar (default `true`). Also configurable via `antigravity.statusShowOpus` in `~/.pi/agent/settings.json` or `.pi/settings.json`. |
 
 By default, the provider tries `https://daily-cloudcode-pa.googleapis.com`, then the sandbox host, then `https://cloudcode-pa.googleapis.com`. Prefer the built-in OAuth client unless you have a reason to use your own credentials.
 

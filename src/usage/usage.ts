@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   antigravityHeaders,
@@ -13,7 +14,8 @@ import {
   setLastStatus,
 } from "../diagnostics/diagnostics.js";
 import { PROVIDER_ID } from "../models/models.js";
-import { isRecord } from "../utils/util.js";
+import { antigravityEnv, isRecord } from "../utils/util.js";
+import { projectSettingsJsonPath, settingsJsonPath } from "../utils/paths.js";
 import { safeError } from "../utils/security.js";
 import { antigravityFetch } from "../utils/http.js";
 import type {
@@ -440,12 +442,81 @@ export function getGroupShortLabel(groupName: string, bucketId?: string): string
   return groupName.split(/\s+/)[0] || "Quota";
 }
 
+export interface FooterStatusOptions {
+  showOpus?: boolean;
+}
+
+export function parseOpusConfigValue(val: unknown): boolean | undefined {
+  if (typeof val === "boolean") return val;
+  if (typeof val === "string") {
+    const trimmed = val.trim().toLowerCase();
+    if (trimmed === "0" || trimmed === "false" || trimmed === "off" || trimmed === "no") {
+      return false;
+    }
+    if (trimmed === "1" || trimmed === "true" || trimmed === "on" || trimmed === "yes") {
+      return true;
+    }
+  }
+  if (typeof val === "number") {
+    if (val === 0) return false;
+    if (val === 1) return true;
+  }
+  return undefined;
+}
+
+export function parseOpusSettingFromFile(path: string): boolean | undefined {
+  try {
+    if (!existsSync(path)) return undefined;
+    const raw: unknown = JSON.parse(readFileSync(path, "utf-8"));
+    if (!isRecord(raw)) return undefined;
+
+    const ag = raw.antigravity;
+    if (isRecord(ag)) {
+      const nested = parseOpusConfigValue(
+        ag.statusShowOpus ?? ag.showOpusUsage ?? ag.statusBarShowOpus ?? ag.showOpus,
+      );
+      if (nested !== undefined) return nested;
+    }
+
+    const flat = parseOpusConfigValue(
+      raw["antigravity.statusShowOpus"] ??
+        raw["antigravity.showOpusUsage"] ??
+        raw["antigravity.statusBarShowOpus"] ??
+        raw["antigravity.showOpus"],
+    );
+    if (flat !== undefined) return flat;
+  } catch {
+    // ignore read/parse errors
+  }
+  return undefined;
+}
+
+export function isStatusOpusEnabled(): boolean {
+  const envVal =
+    antigravityEnv("STATUS_SHOW_OPUS") ??
+    antigravityEnv("SHOW_OPUS_USAGE") ??
+    antigravityEnv("STATUS_BAR_SHOW_OPUS") ??
+    antigravityEnv("SHOW_OPUS");
+  const parsedEnv = parseOpusConfigValue(envVal);
+  if (parsedEnv !== undefined) return parsedEnv;
+
+  const projectSetting = parseOpusSettingFromFile(projectSettingsJsonPath());
+  if (projectSetting !== undefined) return projectSetting;
+
+  const globalSetting = parseOpusSettingFromFile(settingsJsonPath());
+  if (globalSetting !== undefined) return globalSetting;
+
+  return true;
+}
+
 /** Compact single-line status for footer bar display. */
-export function formatFooterStatus(usage: AccountUsage): string {
+export function formatFooterStatus(usage: AccountUsage, opts?: FooterStatusOptions): string {
   if (!usage.groups.length) return "Quota: n/a";
+  const showOpus = opts?.showOpus ?? isStatusOpusEnabled();
   const parts: string[] = [];
   for (const group of usage.groups) {
     const groupLabel = getGroupShortLabel(group.displayName, group.buckets[0]?.bucketId);
+    if (!showOpus && groupLabel === "Opus") continue;
     if (!group.buckets.length) continue;
     const fiveHour = group.buckets.find(
       (b) => b.window === "5h" || b.bucketId.toLowerCase().includes("5h"),
