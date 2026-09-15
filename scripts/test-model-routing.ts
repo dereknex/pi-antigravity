@@ -7,7 +7,12 @@ const fixtureDir = mkdtempSync(join(tmpdir(), "antigravity-routing-"));
 process.env.PI_CODING_AGENT_DIR = fixtureDir;
 
 import type { Api, Context, Model, Tool } from "@earendil-works/pi-ai";
-import { defaultProjectId, stableProjectId } from "../src/client/index.js";
+import {
+  antigravityHeaders,
+  defaultProjectId,
+  defaultUserAgent,
+  stableProjectId,
+} from "../src/client/index.js";
 import { StopReason } from "../src/types/enums.js";
 import {
   ANTIGRAVITY_MODELS,
@@ -853,6 +858,38 @@ const abortedContext = {
 const convertedAborted = convertMessages(flash37Model, abortedContext, geminiRuntime);
 assert.equal(convertedAborted.length, 1);
 assert.equal(convertedAborted[0]?.role, "user");
+
+// Wire fingerprint: User-Agent format (pure agy CLI)
+assert.equal(
+  defaultUserAgent(),
+  "antigravity/cli/1.1.23 (aidev_client; os_type=linux; arch=amd64; cl=974125021; auth_method=consumer)",
+);
+
+// Wire fingerprint: Headers hygiene & environment isolation
+const savedUserAgent = process.env.ANTIGRAVITY_USER_AGENT;
+const savedNoagyUserAgent = process.env.NOAGY_USER_AGENT;
+try {
+  delete process.env.ANTIGRAVITY_USER_AGENT;
+  delete process.env.NOAGY_USER_AGENT;
+
+  const defaultHeaders = antigravityHeaders("test-token-xyz");
+  assert.equal(defaultHeaders.Authorization, "Bearer test-token-xyz");
+  assert.equal(defaultHeaders["Content-Type"], "application/json");
+  assert.equal(defaultHeaders["User-Agent"], defaultUserAgent());
+  assert.equal(defaultHeaders["X-Goog-Api-Client"], undefined);
+  assert.equal(defaultHeaders["Client-Metadata"], undefined);
+  assert.equal(defaultHeaders["Accept"], undefined);
+
+  // Wire fingerprint: Custom User-Agent override
+  process.env.ANTIGRAVITY_USER_AGENT = "custom-agent/1.0";
+  const overriddenHeaders = antigravityHeaders("test-token-xyz");
+  assert.equal(overriddenHeaders["User-Agent"], "custom-agent/1.0");
+} finally {
+  if (savedUserAgent !== undefined) process.env.ANTIGRAVITY_USER_AGENT = savedUserAgent;
+  else delete process.env.ANTIGRAVITY_USER_AGENT;
+  if (savedNoagyUserAgent !== undefined) process.env.NOAGY_USER_AGENT = savedNoagyUserAgent;
+  else delete process.env.NOAGY_USER_AGENT;
+}
 
 console.log(
   `model routing: ${routeCases.length} cases, tool schema, errors, project ids, token clamping, and message conversion passed`,
