@@ -28,6 +28,8 @@ import {
   setLastProjectId,
   setLastResolvedRuntimeModel,
   setLastStatus,
+  setLastToolSchemaWarnings,
+  setLastTrailingToolCall,
 } from "../diagnostics/diagnostics.js";
 import {
   AntigravityRequestType,
@@ -67,6 +69,7 @@ import {
   antigravityEnv,
   antigravityRequestEnvelope,
   isRecord,
+  resolveSessionTrajectory,
   sanitizeText,
 } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
@@ -79,6 +82,9 @@ const ANTIGRAVITY_SYSTEM_INSTRUCTION =
 
 const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
   'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists (e.g. "No emdashes"), or your thinking/personality preambles in the final response. Output only the final response.';
+
+/** Protocol bridge text for turns that need a user boundary but carry no new instructions. */
+const CONTINUATION_TEXT = "Continue the active task using the available instructions and context.";
 
 let toolCallCounter = 0;
 
@@ -128,13 +134,39 @@ function parseImageData(raw: string, explicitMime?: string): { data: string; mim
   };
 }
 
+const SKILL_BLOCK_PATTERN = /<skill\b[^>]*>[\s\S]*?<\/skill\s*>/gi;
+
+/** Injected skill blocks found in a user message's text content. */
+function skillBlocks(content: unknown): string[] {
+  const texts =
+    typeof content === "string"
+      ? [content]
+      : Array.isArray(content)
+        ? content.flatMap((item) =>
+            isRecord(item) && item.type === "text" && typeof item.text === "string"
+              ? [item.text]
+              : [],
+          )
+        : [];
+  return texts.flatMap((text) => text.match(SKILL_BLOCK_PATTERN) || []);
+}
+
+/** Skill blocks are hoisted into systemInstruction; the turn keeps only user prose. */
+function withoutSkillBlocks(text: string): string {
+  return text.replace(SKILL_BLOCK_PATTERN, "");
+}
+
 function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataPart> {
-  if (typeof content === "string") return [{ text: sanitizeText(content) }];
+  const textPart = (text: string): GeminiTextPart[] => {
+    const userText = withoutSkillBlocks(text);
+    return userText.trim() ? [{ text: sanitizeText(userText) }] : [];
+  };
+  if (typeof content === "string") return textPart(content);
   if (!Array.isArray(content)) return [];
   return content.flatMap((item): Array<GeminiTextPart | GeminiInlineDataPart> => {
     if (!isRecord(item)) return [];
     const block = item as ContentBlock;
-    if (block.type === "text") return [{ text: sanitizeText(block.text) }];
+    if (block.type === "text") return textPart(block.text);
     if (block.type === "image") {
       const rawData = block.data || block.source?.data;
       if (!rawData) return [];
@@ -308,14 +340,39 @@ export function convertMessages(
     }
   }
 
-  // Google Antigravity / Gemini requires the first turn to be from 'user'.
-  // If the conversation starts with 'model' (e.g. initial assistant greeting),
-  // prepend a minimal user message to prevent backend 400 rejection.
-  if (contents.length > 0 && contents[0]?.role === GeminiRole.Model) {
-    contents.unshift({
-      role: GeminiRole.User,
-      parts: [{ text: "Hello" }],
-    });
+  // A function-call model turn is only valid immediately after a user turn
+  // (including a function-response turn). Compacted history can also drop the
+  // leading user turn entirely, so restore the boundary before checking for a
+  // natural-language user part. The hasUserText bridge below then supplies the
+  // opening user turn that older code hardcoded as "Hello".
+  for (let index = 0; index < contents.length; index += 1) {
+    const turn = contents[index];
+    if (
+      turn?.role === GeminiRole.Model &&
+      turn.parts.some((part) => "functionCall" in part) &&
+      contents[index - 1]?.role !== GeminiRole.User
+    ) {
+      contents.splice(index, 0, {
+        role: GeminiRole.User,
+        parts: [{ text: CONTINUATION_TEXT }],
+      });
+      index += 1;
+    }
+  }
+
+  // The backend also requires a natural-language user part, including tool-only
+  // continuation turns. Add the protocol bridge only when the injected Skills /
+  // system instruction left no user prose behind.
+  const hasUserText = contents.some(
+    (turn) =>
+      turn.role === GeminiRole.User &&
+      turn.parts.some((part) => "text" in part && Boolean(part.text.trim())),
+  );
+  if (!hasUserText && contents.length > 0) {
+    const bridge = { text: CONTINUATION_TEXT };
+    const userTurn = contents.find((turn) => turn.role === GeminiRole.User);
+    if (userTurn) userTurn.parts.push(bridge);
+    else contents.unshift({ role: GeminiRole.User, parts: [bridge] });
   }
 
   // Antigravity / Vertex API rejects requests ending in a model/assistant message
@@ -326,49 +383,271 @@ export function convertMessages(
     contents.length > 0 &&
     (contents[contents.length - 1]?.role === GeminiRole.Model || lastMsg?.role === "assistant")
   ) {
-    appendTurn(contents, GeminiRole.User, [{ text: "Please continue." }]);
+    // An unresolved tool call at the tail means the tool result never reached the
+    // request. Send the continuation turn to keep the session usable, and report it
+    // through /antigravity.doctor instead of failing the whole turn.
+    const lastParts = contents[contents.length - 1]?.parts ?? [];
+    const unresolvedTools = lastParts.flatMap((part) =>
+      "functionCall" in part && part.functionCall?.name ? [part.functionCall.name] : [],
+    );
+    if (unresolvedTools.length > 0) setLastTrailingToolCall(unresolvedTools);
+    appendTurn(contents, GeminiRole.User, [{ text: CONTINUATION_TEXT }]);
   }
 
   return contents;
 }
 
-function dereferenceSchema(
-  schema: unknown,
-  rootDefs: Record<string, unknown> = {},
-  visited = new Set<unknown>(),
-): unknown {
-  if (!schema || typeof schema !== "object") return schema;
-  if (Array.isArray(schema)) {
-    return schema.map((item) => dereferenceSchema(item, rootDefs, visited));
-  }
+type SchemaReferenceIssue = {
+  path: string;
+  ref: string;
+  reason: string;
+};
 
-  const s = schema as Record<string, unknown>;
-  if (visited.has(s)) return s;
-  visited.add(s);
+type DereferencedSchema = {
+  schema: unknown;
+  issues: SchemaReferenceIssue[];
+};
 
-  const defs: Record<string, unknown> = { ...rootDefs };
-  if (isRecord(s.$defs)) Object.assign(defs, s.$defs);
-  if (isRecord(s.definitions)) Object.assign(defs, s.definitions);
+type DereferenceState = {
+  nodes: number;
+};
 
-  if (typeof s.$ref === "string") {
-    const ref = s.$ref;
-    const match = ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/);
-    if (match && match[1] && defs[match[1]] !== undefined) {
-      const resolved = dereferenceSchema(defs[match[1]], defs, visited);
-      if (isRecord(resolved)) {
-        const { $ref: _, ...rest } = s;
-        const restCleaned = dereferenceSchema(rest, defs, visited);
-        return isRecord(restCleaned) ? { ...resolved, ...restCleaned } : resolved;
-      }
-      return resolved;
+const MAX_SCHEMA_DEREFERENCE_DEPTH = 64;
+const MAX_SCHEMA_DEREFERENCE_NODES = 10_000;
+const SCHEMA_MAP_KEYWORDS = new Set([
+  "properties",
+  "patternProperties",
+  "dependentSchemas",
+  "dependencies",
+]);
+const SCHEMA_VALUE_KEYWORDS = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+const SCHEMA_ARRAY_KEYWORDS = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+
+/** Resolve a local RFC 6901 JSON Pointer against the original tool schema. */
+function resolveLocalJsonPointer(ref: string, rootSchema: unknown): unknown {
+  if (ref === "#") return rootSchema;
+  if (!ref.startsWith("#/")) return undefined;
+
+  let current: unknown = rootSchema;
+  for (const token of ref.slice(2).split("/")) {
+    const key = token.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9]\d*)$/.test(key)) return undefined;
+      const index = Number(key);
+      if (!Number.isSafeInteger(index) || index >= current.length) return undefined;
+      current = current[index];
+      continue;
     }
+    if (!current || typeof current !== "object") return undefined;
+    if (!Object.prototype.hasOwnProperty.call(current, key)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+/** Dereference every schema in a keyword map without interpreting map keys as JSON Schema keywords. */
+function dereferenceSchemaMap(
+  schemaMap: unknown,
+  rootSchema: unknown,
+  refStack: Set<string>,
+  objectStack: Set<object>,
+  state: DereferenceState,
+  path: string,
+  depth: number,
+): DereferencedSchema {
+  if (!isRecord(schemaMap)) {
+    return dereferenceSchema(schemaMap, rootSchema, refStack, objectStack, state, path, depth);
   }
 
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(s)) {
-    out[key] = dereferenceSchema(value, defs, visited);
+  const issues: SchemaReferenceIssue[] = [];
+  for (const [key, value] of Object.entries(schemaMap)) {
+    const result = dereferenceSchema(
+      value,
+      rootSchema,
+      refStack,
+      objectStack,
+      state,
+      `${path}.${key}`,
+      depth,
+    );
+    out[key] = result.schema;
+    issues.push(...result.issues);
   }
-  return out;
+  return { schema: out, issues };
+}
+
+/**
+ * Inline reachable local references while bounding expansion of untrusted MCP schemas.
+ * A reported issue causes only the affected tool declaration to be omitted.
+ */
+function dereferenceSchema(
+  schema: unknown,
+  rootSchema: unknown = schema,
+  refStack = new Set<string>(),
+  objectStack = new Set<object>(),
+  state: DereferenceState = { nodes: 0 },
+  path = "$",
+  depth = 0,
+): DereferencedSchema {
+  if (depth > MAX_SCHEMA_DEREFERENCE_DEPTH) {
+    return {
+      schema: {},
+      issues: [
+        {
+          path,
+          ref: "(depth limit)",
+          reason: `schema expansion exceeded ${MAX_SCHEMA_DEREFERENCE_DEPTH} levels`,
+        },
+      ],
+    };
+  }
+  state.nodes += 1;
+  if (state.nodes > MAX_SCHEMA_DEREFERENCE_NODES) {
+    return {
+      schema: {},
+      issues: [
+        {
+          path,
+          ref: "(node limit)",
+          reason: `schema expansion exceeded ${MAX_SCHEMA_DEREFERENCE_NODES} nodes`,
+        },
+      ],
+    };
+  }
+  if (!schema || typeof schema !== "object") return { schema, issues: [] };
+
+  if (Array.isArray(schema)) {
+    const results = schema.map((item, index) =>
+      dereferenceSchema(
+        item,
+        rootSchema,
+        refStack,
+        objectStack,
+        state,
+        `${path}[${index}]`,
+        depth + 1,
+      ),
+    );
+    return {
+      schema: results.map((result) => result.schema),
+      issues: results.flatMap((result) => result.issues),
+    };
+  }
+
+  const s = schema as Record<string, unknown>;
+  if (objectStack.has(s)) {
+    return {
+      schema: {},
+      issues: [{ path, ref: "(object cycle)", reason: "circular schema object" }],
+    };
+  }
+
+  const nextObjectStack = new Set(objectStack);
+  nextObjectStack.add(s);
+
+  if (typeof s.$ref === "string") {
+    const ref = s.$ref;
+    if (refStack.has(ref)) {
+      return {
+        schema: {},
+        issues: [{ path, ref, reason: "circular local reference" }],
+      };
+    }
+
+    const target = resolveLocalJsonPointer(ref, rootSchema);
+    if (target === undefined) {
+      return {
+        schema: {},
+        issues: [{ path, ref, reason: "target is not present in the root schema" }],
+      };
+    }
+
+    const nextRefStack = new Set(refStack);
+    nextRefStack.add(ref);
+    const resolved = dereferenceSchema(
+      target,
+      rootSchema,
+      nextRefStack,
+      nextObjectStack,
+      state,
+      path,
+      depth + 1,
+    );
+    const { $ref: _, ...siblings } = s;
+    const siblingResult = dereferenceSchema(
+      siblings,
+      rootSchema,
+      refStack,
+      nextObjectStack,
+      state,
+      path,
+      depth + 1,
+    );
+
+    if (isRecord(resolved.schema) && isRecord(siblingResult.schema)) {
+      return {
+        schema: { ...resolved.schema, ...siblingResult.schema },
+        issues: [...resolved.issues, ...siblingResult.issues],
+      };
+    }
+    return {
+      schema: resolved.schema,
+      issues: [...resolved.issues, ...siblingResult.issues],
+    };
+  }
+
+  const out: Record<string, unknown> = {};
+  const issues: SchemaReferenceIssue[] = [];
+  for (const [key, value] of Object.entries(s)) {
+    // Definitions are available through rootSchema while resolving $ref, but must
+    // not be emitted because the Antigravity backend requires self-contained schemas.
+    if (key === "$defs" || key === "definitions") continue;
+
+    let result: DereferencedSchema | undefined;
+    if (SCHEMA_MAP_KEYWORDS.has(key)) {
+      result = dereferenceSchemaMap(
+        value,
+        rootSchema,
+        refStack,
+        nextObjectStack,
+        state,
+        `${path}.${key}`,
+        depth + 1,
+      );
+    } else if (SCHEMA_VALUE_KEYWORDS.has(key) || SCHEMA_ARRAY_KEYWORDS.has(key)) {
+      result = dereferenceSchema(
+        value,
+        rootSchema,
+        refStack,
+        nextObjectStack,
+        state,
+        `${path}.${key}`,
+        depth + 1,
+      );
+    }
+
+    if (result) {
+      out[key] = result.schema;
+      issues.push(...result.issues);
+    } else {
+      out[key] = value;
+    }
+  }
+  return { schema: out, issues };
 }
 
 function ensureRootObjectSchema(schema: unknown): Record<string, unknown> {
@@ -381,21 +660,40 @@ function ensureRootObjectSchema(schema: unknown): Record<string, unknown> {
   return schema;
 }
 
+const META_SCHEMA_KEYWORDS = new Set([
+  "$schema",
+  "$id",
+  "$anchor",
+  "$dynamicAnchor",
+  "$vocabulary",
+  "$comment",
+  "$defs",
+  "definitions",
+]);
+
+/** Remove schema metadata without treating user-defined property names as keywords. */
+function stripMetaSchemaMap(schemaMap: unknown): unknown {
+  if (!isRecord(schemaMap)) return stripMetaSchema(schemaMap);
+  return Object.fromEntries(
+    Object.entries(schemaMap).map(([key, value]) => [key, stripMetaSchema(value)]),
+  );
+}
+
+/** Remove metadata that Cloud Code Assist rejects from JSON Schema keyword positions. */
 function stripMetaSchema(schema: unknown): unknown {
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
-  const omit = new Set([
-    "$schema",
-    "$id",
-    "$anchor",
-    "$dynamicAnchor",
-    "$vocabulary",
-    "$comment",
-    "$defs",
-    "definitions",
-  ]);
+  if (!schema || typeof schema !== "object") return schema;
+  if (Array.isArray(schema)) return schema.map(stripMetaSchema);
+
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(schema)) {
-    if (!omit.has(key)) out[key] = stripMetaSchema(value);
+    if (META_SCHEMA_KEYWORDS.has(key)) continue;
+    if (SCHEMA_MAP_KEYWORDS.has(key)) {
+      out[key] = stripMetaSchemaMap(value);
+    } else if (SCHEMA_VALUE_KEYWORDS.has(key) || SCHEMA_ARRAY_KEYWORDS.has(key)) {
+      out[key] = stripMetaSchema(value);
+    } else {
+      out[key] = value;
+    }
   }
   return out;
 }
@@ -470,29 +768,41 @@ export function convertTools(
   useLegacyParameters = false,
 ): { functionDeclarations: GeminiFunctionDeclaration[] }[] | undefined {
   if (!tools?.length) return undefined;
-  return [
-    {
-      functionDeclarations: tools.map((tool) => {
-        const dereferenced = dereferenceSchema(tool.parameters);
-        const rootObject = ensureRootObjectSchema(dereferenced);
-        const schema = stripMetaSchema(rootObject);
-        return {
-          name: tool.name,
-          description: tool.description,
-          ...(useLegacyParameters
-            ? { parameters: normalizeCustomToolSchema(schema) }
-            : { parametersJsonSchema: schema }),
-        };
-      }),
-    },
-  ];
+
+  const warnings: string[] = [];
+  const functionDeclarations = tools.flatMap((tool) => {
+    const dereferenced = dereferenceSchema(tool.parameters);
+    if (dereferenced.issues.length > 0) {
+      const detail = dereferenced.issues
+        .map((issue) => `${issue.path} (${issue.ref}: ${issue.reason})`)
+        .join(", ");
+      warnings.push(`Skipped tool '${tool.name}' due to unresolved schema reference: ${detail}`);
+      return [];
+    }
+
+    const rootObject = ensureRootObjectSchema(dereferenced.schema);
+    const schema = stripMetaSchema(rootObject);
+    return [
+      {
+        name: tool.name,
+        description: tool.description,
+        ...(useLegacyParameters
+          ? { parameters: normalizeCustomToolSchema(schema) }
+          : { parametersJsonSchema: schema }),
+      },
+    ];
+  });
+
+  setLastToolSchemaWarnings(warnings.length ? warnings : undefined);
+  if (!functionDeclarations.length) return undefined;
+  return [{ functionDeclarations }];
 }
 
 function mapToolChoiceMode(
   toolChoice: AntigravityStreamOptions["toolChoice"],
 ): GeminiToolCallingMode {
   if (toolChoice === ToolChoice.None) return GeminiToolCallingMode.None;
-  if ((toolChoice as string) === ToolChoice.Any || (toolChoice as string) === ToolChoice.Required)
+  if (toolChoice === ToolChoice.Any || toolChoice === ToolChoice.Required)
     return GeminiToolCallingMode.Any;
   return GeminiToolCallingMode.Auto;
 }
@@ -505,21 +815,38 @@ export function buildRequest(
   options: AntigravityStreamOptions,
   runtimeModel: string,
 ): AntigravityGenerateRequest {
+  const injectedSkills = context.messages.flatMap((msg) =>
+    msg.role === "user" ? skillBlocks(msg.content) : [],
+  );
+  const contents = convertMessages(model, context, runtimeModel);
+  const hasUserText = contents.some(
+    (turn) =>
+      turn.role === GeminiRole.User &&
+      turn.parts.some((part) => "text" in part && Boolean(part.text.trim())),
+  );
+  if (!hasUserText && (injectedSkills.length > 0 || Boolean(context.systemPrompt))) {
+    contents.unshift({
+      role: GeminiRole.User,
+      parts: [{ text: "Apply the active system instructions." }],
+    });
+  }
+
   const request: GeminiRequestBody = {
-    contents: convertMessages(model, context, runtimeModel),
+    contents,
     systemInstruction: {
       role: GeminiRole.User,
       parts: [
         { text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
         { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION },
         ...(context.systemPrompt ? [{ text: sanitizeText(context.systemPrompt) }] : []),
+        ...injectedSkills.map((skill) => ({ text: sanitizeText(skill) })),
       ],
     },
   };
 
   const generationConfig: GeminiGenerationConfig = {};
   if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
-  const thinking = getThinkingConfig(model.id, options.reasoning ?? "off");
+  const thinking = getThinkingConfig(runtimeModel, options.reasoning ?? "off");
   if (thinking) generationConfig.thinkingConfig = thinking;
   const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
   if (options.maxTokens !== undefined) {
@@ -547,21 +874,44 @@ export function buildRequest(
   const tools = convertTools(context.tools, isClaude || model.id.startsWith("gpt-oss-"));
   if (tools) {
     request.tools = tools;
+  }
+  // agy CLI omits toolConfig entirely in default (auto) mode, even with tools declared;
+  // it only appears when the caller pins a mode. VALIDATED was a legacy VS Code fingerprint.
+  if (options.toolChoice && options.toolChoice !== ToolChoice.Auto) {
     request.toolConfig = {
-      functionCallingConfig: {
-        mode:
-          options.toolChoice && options.toolChoice !== ToolChoice.Auto
-            ? mapToolChoiceMode(options.toolChoice)
-            : GeminiToolCallingMode.Validated,
-      },
-    };
-  } else if (isClaude) {
-    request.toolConfig = {
-      functionCallingConfig: { mode: GeminiToolCallingMode.Validated },
+      functionCallingConfig: { mode: mapToolChoiceMode(options.toolChoice) },
     };
   }
 
-  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude);
+  const isNonGemini =
+    isClaude ||
+    model.id.startsWith("gpt-oss-") ||
+    runtimeModel.startsWith("gpt-oss-") ||
+    (!model.id.startsWith("gemini-") && !runtimeModel.startsWith("gemini-"));
+
+  // Pure agy CLI wire alignment:
+  // - step in requestId (.../<step>) equals contents.length (total content blocks)
+  // - last_step_index is 0-based index of the last content block (contents.length - 1)
+  // - request_id is ${trajectoryId}-${requestIndex} (0-based HTTP request sequence counter)
+  //   In multi-turn agent loops (with tools), every completed assistant response increments the request counter.
+  const step = Math.max(1, request.contents.length);
+  const lastStepIndex = String(Math.max(0, request.contents.length - 1));
+  const requestIndex =
+    context.messages?.filter(
+      (m) => m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted",
+    ).length ?? 0;
+
+  const { conversationId, trajectoryId } = resolveSessionTrajectory(context);
+
+  const envelope = antigravityRequestEnvelope(runtimeModel, {
+    isClaude,
+    isNonGemini,
+    step,
+    lastStepIndex,
+    requestIndex,
+    conversationId,
+    trajectoryId,
+  });
   request.sessionId = options.sessionId || envelope.sessionId;
   request.labels = envelope.labels;
 
@@ -593,7 +943,17 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
       return `Antigravity request format was rejected by the backend (${msg}). Next: switch to a simpler model or retry after updating the extension.`;
     }
     if (/assistant message prefill|end with a user message/i.test(msg)) {
-      return `Antigravity rejected assistant message prefill (${msg}). Next: retry without prefill or update the extension.`;
+      return "Antigravity rejected an invalid conversation message boundary. Next: update the extension or add a user message / start a new session, then retry.";
+    }
+    if (/Requests ending with a model turn are not supported/i.test(msg)) {
+      return "Antigravity rejected an invalid conversation message boundary. Next: update the extension or add a user message / start a new session, then retry.";
+    }
+    if (
+      /function call turn comes immediately after a user turn or after a function response turn/i.test(
+        msg,
+      )
+    ) {
+      return "Antigravity rejected an invalid function-call message boundary. Next: update the extension or start a new session, then retry; re-login is not required.";
     }
     if (/thought_signature|thoughtSignature/i.test(msg)) {
       return `Antigravity rejected missing thought_signature (${msg}). Next: this is usually cross-provider history (e.g. kimi→gemini 3.7); update the extension (auto-disables thinking for legacy tool calls) or start a new session / switch to a non-thinking model.`;
@@ -627,10 +987,20 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     if (/Individual quota reached/i.test(msg)) {
       return `Quota reached. Please wait ${wait || "for reset"}. Next: switch models or try again after reset.`;
     }
-    if (/quota/i.test(msg)) {
+    // Google answers a real quota wall with a "Resets in …" hint, but uses generic
+    // RESOURCE_EXHAUSTED ("Resource has been exhausted (e.g. check quota).") for
+    // transient throttling and capacity pressure. Classifying on the word "quota"
+    // alone wrongly marked transient throttling as a hard quota wall, disabling
+    // Pi's automatic retry backoff. Keep real quota walls non-retryable, and
+    // format transient throttling so Pi's retry mechanism engages.
+    const hardLimit =
+      Boolean(wait) ||
+      (!/rate.?limit/i.test(msg) &&
+        /quota exceeded|exceeded your|limit reached|reached your|daily limit/i.test(msg));
+    if (hardLimit) {
       return `Quota reached.${wait ? ` Please wait ${wait}.` : ""} Next: switch models or retry later.`;
     }
-    return `Rate limited by Antigravity. Next: wait a bit and retry.${wait ? ` Reset: ${wait}.` : ""}`;
+    return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
   }
   if (status === 500) {
     return "Antigravity had an internal server error. Next: retry in a moment or switch models.";
@@ -670,6 +1040,156 @@ function createOutput(model: Model<Api>): AssistantMessage {
 
 function asToolCallArguments(args: Record<string, unknown> | undefined): ToolCall["arguments"] {
   return (args ?? {}) as ToolCall["arguments"];
+}
+
+/** Default response-header deadline for streaming requests (see fetchWithHeaderDeadline). */
+const STREAM_HEADER_TIMEOUT_DEFAULT_MS = 180_000;
+/** Default mid-body stall deadline: abort when no SSE bytes arrive for this long. */
+const STREAM_STALL_TIMEOUT_DEFAULT_MS = 120_000;
+
+function envTimeoutMs(name: string, fallback: number): number {
+  const raw = antigravityEnv(name);
+  if (!raw || !/^\d+$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : fallback;
+}
+
+/**
+ * Streaming header deadline in milliseconds, from ANTIGRAVITY_STREAM_HEADER_TIMEOUT_MS
+ * (or the legacy NOAGY_ prefix). 0 disables the deadline; invalid values fall back
+ * to the default.
+ */
+export function streamHeaderTimeoutMs(): number {
+  return envTimeoutMs("STREAM_HEADER_TIMEOUT_MS", STREAM_HEADER_TIMEOUT_DEFAULT_MS);
+}
+
+/**
+ * Mid-body stall deadline in milliseconds, from ANTIGRAVITY_STREAM_STALL_TIMEOUT_MS
+ * (legacy NOAGY_ prefix honored). 0 disables. A healthy SSE stream emits bytes
+ * continuously while generating, so a silent gap this long means the connection
+ * is dead even though headers arrived — abort with a named error rather than
+ * hanging until an external process timeout.
+ */
+export function streamStallTimeoutMs(): number {
+  return envTimeoutMs("STREAM_STALL_TIMEOUT_MS", STREAM_STALL_TIMEOUT_DEFAULT_MS);
+}
+
+function stallError(stallMs: number): Error {
+  return new Error(`stream stalled: no data for ${stallMs}ms`);
+}
+
+/**
+ * Guard a response body against mid-stream stalls while retaining caller
+ * cancellation until the body finishes or is cancelled. The wrapper reads only
+ * when its consumer pulls, preserving backpressure; its timer is unref'd so an
+ * armed deadline cannot keep the process alive.
+ */
+function guardResponseBody(
+  response: Response,
+  controller: AbortController,
+  stallMs: number,
+  cleanup: () => void,
+): Response {
+  if (!response.body) {
+    cleanup();
+    return response;
+  }
+  const reader = response.body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (timer) clearTimeout(timer);
+    cleanup();
+  };
+  const reset = () => {
+    if (stallMs <= 0) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(stallError(stallMs)), stallMs);
+    timer.unref?.();
+  };
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const abortBody = () => {
+    streamController?.error(controller.signal.reason);
+    void reader.cancel(controller.signal.reason).catch(() => undefined);
+    finish();
+  };
+  controller.signal.addEventListener("abort", abortBody, { once: true });
+  reset();
+  const guarded = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+    },
+    async pull(streamController) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          finish();
+          streamController.close();
+          return;
+        }
+        if (!(chunk.value instanceof Uint8Array)) {
+          throw new Error("Response body yielded an invalid chunk");
+        }
+        reset();
+        streamController.enqueue(chunk.value);
+      } catch (error) {
+        finish();
+        streamController.error(error);
+      }
+    },
+    async cancel(reason) {
+      finish();
+      await reader.cancel(reason);
+    },
+  });
+  return new Response(guarded, response);
+}
+
+/**
+ * Fetch with a response-header deadline and a mid-body stall watchdog. A server
+ * can accept a request on a warm keep-alive socket and then never send response
+ * headers (header phase), or send headers and then go silent mid-body (stall
+ * phase); either way the request is aborted with a named error instead of
+ * hanging until an external process timeout. Long healthy responses are never
+ * cut: the header timer disarms once headers arrive, and the stall timer resets
+ * on every chunk, so only genuine silence aborts.
+ *
+ * Exported with an injectable fetch for unit tests.
+ */
+export async function fetchWithHeaderDeadline(
+  url: string,
+  init: RequestInit,
+  callerSignal: AbortSignal | undefined,
+  timeoutMs: number,
+  stallMs: number = 0,
+  fetchFn: (input: string, init: RequestInit) => Promise<Response> = antigravityFetch,
+): Promise<Response> {
+  if (timeoutMs <= 0 && stallMs <= 0) {
+    return fetchFn(url, { ...init, signal: callerSignal ?? init.signal });
+  }
+  const controller = new AbortController();
+  const forward = () => controller.abort(callerSignal?.reason);
+  const cleanup = () => callerSignal?.removeEventListener("abort", forward);
+  callerSignal?.addEventListener("abort", forward, { once: true });
+  if (callerSignal?.aborted) forward();
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(
+          () => controller.abort(new Error(`no response headers within ${timeoutMs}ms`)),
+          timeoutMs,
+        )
+      : undefined;
+  let responseBodyGuarded = false;
+  try {
+    const response = await fetchFn(url, { ...init, signal: controller.signal });
+    responseBodyGuarded = Boolean(response.body);
+    return guardResponseBody(response, controller, stallMs, cleanup);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!responseBodyGuarded) cleanup();
+  }
 }
 
 /** Exported for unit tests. */
@@ -888,11 +1408,8 @@ export function streamAntigravity(
         runtimeCandidates.push(fallback);
       }
 
-      const isClaudeReasoning = model.id.startsWith("claude-") && model.reasoning;
-      const requestHeaders: Record<string, string> = {
-        ...antigravityHeaders(creds.token),
-        ...(isClaudeReasoning ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
-      };
+      // Pure agy CLI wire fingerprint: no anthropic-beta header during Claude reasoning.
+      const requestHeaders: Record<string, string> = antigravityHeaders(creds.token);
 
       let response: Response | undefined;
       let lastText = "";
@@ -913,19 +1430,29 @@ export function streamAntigravity(
 
           for (const endpoint of endpointCandidates()) {
             setLastEndpoint(endpoint);
-            response = await antigravityFetch(
+            response = await fetchWithHeaderDeadline(
               `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
               {
                 method: "POST",
                 headers: requestHeaders,
                 body,
-                signal: opts.signal,
               },
+              opts.signal,
+              streamHeaderTimeoutMs(),
+              streamStallTimeoutMs(),
             );
             setLastStatus(response.status);
             if (response.ok) break;
             lastText = await response.text();
-            if (response.status === 429 && /Individual quota reached/i.test(lastText)) break;
+            if (
+              response.status === 429 &&
+              (/Individual quota reached/i.test(lastText) ||
+                /Resets? in /i.test(lastText) ||
+                (!/rate.?limit/i.test(lastText) &&
+                  /quota exceeded|exceeded your|daily limit/i.test(lastText)))
+            ) {
+              break;
+            }
             if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
           }
 

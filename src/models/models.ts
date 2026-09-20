@@ -1,5 +1,5 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import type { AntigravityRouting, ModelQuotaRow } from "../types/types.js";
+import type { AntigravityRouting, ModelQuotaRow, ThinkingWire } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ export const PROVIDER_NAME = "Antigravity";
  * Public selectable model IDs → backend request model IDs by thinking effort.
  *
  * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
+ * - Gemini 3.8 Flash (Low / Medium / High)
  * - Gemini 3.7 Flash (Low / Medium / High)
  * - Gemini 3.6 Flash (Low / Medium / High)
  * - Gemini 3.5 Flash (Low / Medium / High)
@@ -58,6 +59,17 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
       xhigh: "gemini-pro-agent",
     },
     defaultRequestId: "gemini-3.1-pro-low",
+  },
+  "gemini-3.8-flash": {
+    off: "gemini-3.8-flash-low",
+    routing: {
+      minimal: "gemini-3.8-flash-low",
+      low: "gemini-3.8-flash-low",
+      medium: "gemini-3.8-flash-medium",
+      high: "gemini-3.8-flash-high",
+      xhigh: "gemini-3.8-flash-high",
+    },
+    defaultRequestId: "gemini-3.8-flash-low",
   },
   "gemini-3.7-flash": {
     off: "gemini-3.7-flash-low",
@@ -110,6 +122,10 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
  * Requesting more than these limits returns a 400 Bad Request from the API.
  */
 export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  "gemini-3.8-flash": 65536,
+  "gemini-3.8-flash-low": 65536,
+  "gemini-3.8-flash-medium": 65536,
+  "gemini-3.8-flash-high": 65536,
   "gemini-3.7-flash": 65536,
   "gemini-3.7-flash-tiered": 65536,
   // Retain rollout-era IDs for compatibility with pinned runtime overrides.
@@ -197,6 +213,16 @@ const thinkingLevelMaps = {
 
 /** Same set as `agy models`, collapsed to public Pi model IDs. */
 export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash (Antigravity)",
+    reasoning: true,
+    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
+    input: ["text", "image"],
+    cost: freeCost,
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
   {
     id: "gemini-3.7-flash",
     name: "Gemini 3.7 Flash (Antigravity)",
@@ -548,10 +574,16 @@ export function applyDerivedModels(rows: ModelQuotaRow[]): ProviderModelConfig[]
 }
 
 /**
- * If a next-gen model (e.g. Gemini 3.7 Flash) is not yet available on the backend,
- * provide a fallback runtime model ID (e.g. Gemini 3.6 Flash) to maintain availability.
+ * If a next-gen model (e.g. Gemini 3.8 Flash) is not yet available on the backend,
+ * provide a fallback runtime model ID (e.g. Gemini 3.7 Flash) to maintain availability.
  */
 export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): string | undefined {
+  if (runtimeModel.startsWith("gemini-3.8-flash-")) {
+    return runtimeModel.replace("gemini-3.8-flash-", "gemini-3.7-flash-");
+  }
+  if (runtimeModel === "gemini-3.8-flash") {
+    return "gemini-3.7-flash-low";
+  }
   if (runtimeModel === "gemini-3.7-flash-tiered") {
     return getAntigravityRequestModelId("gemini-3.6-flash", effort);
   }
@@ -564,60 +596,106 @@ export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): 
   return undefined;
 }
 
-export type GeminiThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
-
-export type ThinkingWire = {
-  includeThoughts: boolean;
-  thinkingLevel?: GeminiThinkingLevel;
-  thinkingBudget?: number;
-};
-
 export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
+  // Gemini 3.8 Flash
+  "gemini-3.8-flash": "MODEL_PLACEHOLDER_M318",
+  "gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
+  "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
+  "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
+  "gemini-3.8-flash-tiered": "MODEL_PLACEHOLDER_M322",
+  // Gemini 3.7 Flash
+  "gemini-3.7-flash": "MODEL_PLACEHOLDER_M298",
+  "gemini-3.7-flash-high": "MODEL_PLACEHOLDER_M298",
+  "gemini-3.7-flash-medium": "MODEL_PLACEHOLDER_M299",
+  "gemini-3.7-flash-low": "MODEL_PLACEHOLDER_M300",
+  "gemini-3.7-flash-tiered": "MODEL_PLACEHOLDER_M301",
+  // Gemini 3.6 Flash
+  "gemini-3.6-flash": "MODEL_PLACEHOLDER_M71",
+  "gemini-3.6-flash-high": "MODEL_PLACEHOLDER_M71",
+  "gemini-3.6-flash-medium": "MODEL_PLACEHOLDER_M72",
+  "gemini-3.6-flash-low": "MODEL_PLACEHOLDER_M73",
+  "gemini-3.6-flash-tiered": "MODEL_PLACEHOLDER_M196",
+  // Gemini 3.5 Flash
+  "gemini-3.5-flash": "MODEL_PLACEHOLDER_M20",
   "gemini-3.5-flash-extra-low": "MODEL_PLACEHOLDER_M187",
   "gemini-3.5-flash-low": "MODEL_PLACEHOLDER_M20",
-  "gemini-3-flash-agent": "MODEL_PLACEHOLDER_M132",
+  "gemini-3-flash-agent": "MODEL_PLACEHOLDER_M84",
+  // Gemini 3.1 Pro
+  "gemini-3.1-pro": "MODEL_PLACEHOLDER_M36",
   "gemini-3.1-pro-low": "MODEL_PLACEHOLDER_M36",
+  "gemini-3.1-pro-high": "MODEL_PLACEHOLDER_M37",
   "gemini-pro-agent": "MODEL_PLACEHOLDER_M16",
+  // Claude
+  "claude-sonnet-4-6": "MODEL_PLACEHOLDER_M35",
+  "claude-opus-4-6": "MODEL_PLACEHOLDER_M26",
+  "claude-opus-4-6-thinking": "MODEL_PLACEHOLDER_M26",
+  // GPT-OSS
+  "gpt-oss-120b": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+  "gpt-oss-120b-medium": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
 };
 
-function googleLevel(effort: string | undefined): GeminiThinkingLevel {
-  if (effort === "high" || effort === "xhigh") return "HIGH";
-  if (effort === "medium") return "MEDIUM";
-  return "LOW";
+const modelEnumCache = new Map<string, string>();
+
+/** Register dynamically discovered model enum (e.g. from fetchAvailableModels). */
+export function registerModelEnum(wireModelId: string, modelEnum: string): void {
+  if (wireModelId && modelEnum) {
+    modelEnumCache.set(wireModelId, modelEnum);
+  }
+}
+
+/** Register batch of discovered model enums from fetchAvailableModels raw models dictionary. */
+export function registerDiscoveredModelEnums(
+  models: Record<string, { model?: unknown }> | undefined,
+): void {
+  if (!models) return;
+  for (const [wireId, info] of Object.entries(models)) {
+    if (typeof info?.model === "string" && info.model) {
+      modelEnumCache.set(wireId, info.model);
+    }
+  }
+}
+
+/** Get model_enum label for a given wire model id (dynamic cache first, then static fallback). */
+export function getModelEnum(wireModelId: string): string | undefined {
+  const direct = modelEnumCache.get(wireModelId) || ANTIGRAVITY_MODEL_ENUM[wireModelId];
+  if (direct) return direct;
+
+  // Runtime overrides may name a public/base model while discovery only returned
+  // an enum for its selected runtime variant (for example `-low`).
+  const routed = getAntigravityRequestModelId(wireModelId, undefined);
+  return modelEnumCache.get(routed) || ANTIGRAVITY_MODEL_ENUM[routed];
 }
 
 export function getThinkingConfig(
   modelId: string,
   effort: string | undefined,
 ): ThinkingWire | undefined {
-  if (modelId === "gemini-3.7-flash" || modelId === "gemini-3.6-flash") {
-    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
+  if (modelId.startsWith("claude-")) {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    return { includeThoughts: true, thinkingBudget: 1024 };
   }
-  if (modelId === "gemini-3.5-flash") {
+  if (modelId.startsWith("gpt-oss-")) {
+    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+    return { includeThoughts: true, thinkingBudget: 8192 };
+  }
+  if (modelId.startsWith("gemini-3.5-flash") || modelId === "gemini-3-flash-agent") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     const thinkingBudget =
       effort === "high" || effort === "xhigh" ? 10_000 : effort === "medium" ? 4_000 : 1_000;
     return { includeThoughts: true, thinkingBudget };
   }
-  if (modelId === "gemini-3.1-pro") {
+  if (modelId.startsWith("gemini-3.1-pro") || modelId === "gemini-pro-agent") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
     return {
       includeThoughts: true,
       thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
     };
   }
-  // Generic fallback for derived/future Gemini families so new catalog entries
-  // get thinking controls without a code change.
-  if (/^gemini-\d+\.\d+-flash/.test(modelId)) {
+  if (modelId.startsWith("gemini-")) {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
-  }
-  if (/^gemini-\d+\.\d+-pro/.test(modelId)) {
-    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    return {
-      includeThoughts: true,
-      thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
-    };
+    const thinkingBudget =
+      effort === "high" || effort === "xhigh" ? -1 : effort === "medium" ? 4_000 : 1_000;
+    return { includeThoughts: true, thinkingBudget };
   }
   return undefined;
 }

@@ -13,7 +13,7 @@ import {
   setLastProjectId,
   setLastStatus,
 } from "../diagnostics/diagnostics.js";
-import { PROVIDER_ID } from "../models/models.js";
+import { PROVIDER_ID, registerDiscoveredModelEnums } from "../models/models.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
 import { projectSettingsJsonPath, settingsJsonPath } from "../utils/paths.js";
 import { safeError } from "../utils/security.js";
@@ -258,10 +258,14 @@ function parseModels(data: unknown): {
             : undefined,
       supportsThinking: !!info.supportsThinking,
       supportsImages: !!info.supportsImages,
+      modelEnum: typeof info.model === "string" && info.model ? info.model : undefined,
       recommended: !!info.recommended,
     });
   }
   models.sort((a, b) => a.modelId.localeCompare(b.modelId));
+  // Publish the backend enum ids so the `model_enum` request label can be set for
+  // derived families too (static table only covers the curated catalog).
+  registerDiscoveredModelEnums(modelsObj);
   return {
     models,
     defaultAgentModelId:

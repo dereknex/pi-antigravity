@@ -11,6 +11,7 @@ import {
 } from "../diagnostics/diagnostics.js";
 import { assertSafeApiBaseUrl, safeError } from "../utils/security.js";
 import type { AntigravityApiKey, DynamicModelInfo } from "../types/types.js";
+import { registerDiscoveredModelEnums, registerModelEnum } from "../models/models.js";
 import { antigravityEnv, asString, escapeRegExp, isRecord } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
 
@@ -205,6 +206,9 @@ function buildModelMatchRegex(requestedId: string): RegExp {
   //   gemini-3.5-flash-extra-low → "Gemini 3.5 Flash (Low)"
   //   gemini-3.5-flash-low       → "Gemini 3.5 Flash (Medium)"
   //   gemini-3-flash-agent       → "Gemini 3.5 Flash (High)"
+  if (req === "gemini-3.8-flash-low") return /gemini[- ]3\.8[- ]flash \(low\)/i;
+  if (req === "gemini-3.8-flash-medium") return /gemini[- ]3\.8[- ]flash \(medium\)/i;
+  if (req === "gemini-3.8-flash-high") return /gemini[- ]3\.8[- ]flash \(high\)/i;
   if (req === "gemini-3.7-flash-low") return /gemini[- ]3\.7[- ]flash \(low\)/i;
   if (req === "gemini-3.7-flash-medium") return /gemini[- ]3\.7[- ]flash \(medium\)/i;
   if (req === "gemini-3.7-flash-high") return /gemini[- ]3\.7[- ]flash \(high\)/i;
@@ -232,11 +236,14 @@ function dynamicModelFromInfo(modelId: string, info: unknown): DynamicModelInfo 
   const experiments = Array.isArray(info.modelExperiments)
     ? info.modelExperiments.filter((item): item is string => typeof item === "string")
     : undefined;
+  const modelEnum = asString(info.model);
+  if (modelEnum) registerModelEnum(modelId, modelEnum);
   return {
     id: modelId,
     experiments,
     apiProvider: asString(info.apiProvider),
     modelProvider: asString(info.modelProvider),
+    model: modelEnum,
   };
 }
 
@@ -314,6 +321,9 @@ async function fetchAvailableRuntimeModelUncached(
       if (!res.ok) continue;
       setLastEndpoint(endpoint);
       const data: unknown = await res.json();
+      if (isRecord(data) && isRecord(data.models)) {
+        registerDiscoveredModelEnums(data.models as Record<string, { model?: unknown }>);
+      }
       const labels = [...new Set(collectModelLabels(data))].slice(0, 16);
       if (labels.length) lastLabels = labels.join(",");
       const found = findDynamicModel(data, requestedRuntimeModel);

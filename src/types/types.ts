@@ -31,6 +31,8 @@ export type DynamicModelInfo = {
   experiments?: string[];
   apiProvider?: string;
   modelProvider?: string;
+  /** Backend enum id (`model` field) used for the `model_enum` request label. */
+  model?: string;
 };
 
 export type CallbackServer = {
@@ -50,7 +52,7 @@ export type AntigravityRouting = {
 export const ANTIGRAVITY_API = "antigravity-api" as const;
 export type AntigravityApi = typeof ANTIGRAVITY_API;
 
-export type AntigravityStreamOptions = SimpleStreamOptions & {
+export type AntigravityStreamOptions = Omit<SimpleStreamOptions, "toolChoice"> & {
   toolChoice?: ToolChoice;
 };
 
@@ -101,14 +103,15 @@ export type GeminiToolConfig = {
   };
 };
 
+export type ThinkingWire = {
+  includeThoughts: boolean;
+  thinkingBudget: number;
+};
+
 export type GeminiGenerationConfig = {
   temperature?: number;
   maxOutputTokens?: number;
-  thinkingConfig?: {
-    includeThoughts?: boolean;
-    thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
-    thinkingBudget?: number;
-  };
+  thinkingConfig?: ThinkingWire;
 };
 
 export type GeminiRequestBody = {
@@ -205,6 +208,8 @@ export type ModelQuotaRow = {
   modelProvider?: string;
   supportsThinking?: boolean;
   supportsImages?: boolean;
+  /** Discovery-only backend enum id for this runtime model (wire `model` field). */
+  modelEnum?: string;
   recommended?: boolean;
 };
 
@@ -262,6 +267,8 @@ export type ModelInfoRaw = {
   modelName?: unknown;
   modelProvider?: unknown;
   apiProvider?: unknown;
+  /** Backend enum id reported alongside the runtime model key. */
+  model?: unknown;
   supportsThinking?: unknown;
   supportsImages?: unknown;
   recommended?: unknown;
