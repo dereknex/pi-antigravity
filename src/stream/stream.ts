@@ -9,6 +9,8 @@ import {
   type Tool,
   type ToolCall,
 } from "@earendil-works/pi-ai";
+// Namespace import: transcript helpers only exist on pi-ai >= 0.86; resolved at runtime.
+import * as piAi from "@earendil-works/pi-ai";
 import {
   antigravityHeaders,
   endpointCandidates,
@@ -798,6 +800,83 @@ export function convertTools(
   return [{ functionDeclarations }];
 }
 
+/** Shape of a transcript system message as pi stores it (sections + tool deltas). */
+interface SystemMessageLike {
+  role?: string;
+  content?: string | Array<{ type?: string; text?: string }>;
+  sections?: Record<string, unknown>;
+  toolsAdded?: Tool[];
+  toolsRemoved?: Array<{ name: string }>;
+  tools?: Tool[];
+}
+
+interface PiAiTranscriptModule {
+  getCurrentTools?: (messages: Context["messages"]) => Tool[];
+  getCurrentSystemPrompt?: (messages: Context["messages"]) => string;
+}
+
+function asSystemMessages(messages: Context["messages"] | undefined): SystemMessageLike[] {
+  return [...(messages ?? [])] as SystemMessageLike[];
+}
+
+/**
+ * pi >= 0.86 hands providers a normalized TranscriptContext: the system prompt and the
+ * tool declarations live in system messages, so the flat `context.systemPrompt` /
+ * `context.tools` fields are absent. Older pi releases still set the flat fields.
+ * Resolve both shapes, otherwise a request goes out with no prompt and no tools.
+ */
+export function resolveCurrentSystemPrompt(context: Context): string | undefined {
+  const helper = (piAi as unknown as PiAiTranscriptModule).getCurrentSystemPrompt;
+  if (typeof helper === "function") {
+    const rendered = helper(context.messages);
+    if (rendered) return rendered;
+  }
+
+  // Fallback mirrors pi's own renderer: every system message contributes its content
+  // text, then its sections in insertion order (null removes a section).
+  const contentParts: string[] = [];
+  const sections = new Map<string, string>();
+  for (const message of asSystemMessages(context.messages)) {
+    if (message?.role !== "system") continue;
+    if (typeof message.content === "string") {
+      if (message.content.trim()) contentParts.push(message.content);
+    } else if (Array.isArray(message.content)) {
+      const text = message.content
+        .map((block) => block?.text ?? "")
+        .filter((part) => part.trim().length > 0)
+        .join("\n\n");
+      if (text) contentParts.push(text);
+    }
+    for (const [name, value] of Object.entries(message.sections ?? {})) {
+      if (value === null) sections.delete(name);
+      else if (typeof value === "string" && value.trim()) sections.set(name, value);
+    }
+  }
+  const rendered = [...contentParts, ...sections.values()].join("\n\n");
+  if (rendered) return rendered;
+  return context.systemPrompt;
+}
+
+/** Tools currently in force: per-message deltas on pi >= 0.86, flat field before that. */
+export function resolveCurrentTools(context: Context): Tool[] | undefined {
+  const helper = (piAi as unknown as PiAiTranscriptModule).getCurrentTools;
+  if (typeof helper === "function") {
+    const tools = helper(context.messages);
+    if (tools.length > 0) return tools;
+  }
+
+  const tools = new Map<string, Tool>();
+  for (const message of asSystemMessages(context.messages)) {
+    if (message?.role !== "system") continue;
+    for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of [...(message.toolsAdded ?? []), ...(message.tools ?? [])]) {
+      if (tool && typeof tool.name === "string") tools.set(tool.name, tool);
+    }
+  }
+  if (tools.size > 0) return [...tools.values()];
+  return context.tools?.length ? context.tools : undefined;
+}
+
 function mapToolChoiceMode(
   toolChoice: AntigravityStreamOptions["toolChoice"],
 ): GeminiToolCallingMode {
@@ -818,13 +897,15 @@ export function buildRequest(
   const injectedSkills = context.messages.flatMap((msg) =>
     msg.role === "user" ? skillBlocks(msg.content) : [],
   );
+  const systemPrompt = resolveCurrentSystemPrompt(context);
+  const declaredTools = resolveCurrentTools(context);
   const contents = convertMessages(model, context, runtimeModel);
   const hasUserText = contents.some(
     (turn) =>
       turn.role === GeminiRole.User &&
       turn.parts.some((part) => "text" in part && Boolean(part.text.trim())),
   );
-  if (!hasUserText && (injectedSkills.length > 0 || Boolean(context.systemPrompt))) {
+  if (!hasUserText && (injectedSkills.length > 0 || Boolean(systemPrompt))) {
     contents.unshift({
       role: GeminiRole.User,
       parts: [{ text: "Apply the active system instructions." }],
@@ -838,7 +919,7 @@ export function buildRequest(
       parts: [
         { text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
         { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION },
-        ...(context.systemPrompt ? [{ text: sanitizeText(context.systemPrompt) }] : []),
+        ...(systemPrompt ? [{ text: sanitizeText(systemPrompt) }] : []),
         ...injectedSkills.map((skill) => ({ text: sanitizeText(skill) })),
       ],
     },
@@ -871,7 +952,7 @@ export function buildRequest(
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
   const isClaude = model.id.startsWith("claude-") || runtimeModel.startsWith("claude-");
-  const tools = convertTools(context.tools, isClaude || model.id.startsWith("gpt-oss-"));
+  const tools = convertTools(declaredTools, isClaude || model.id.startsWith("gpt-oss-"));
   if (tools) {
     request.tools = tools;
   }
