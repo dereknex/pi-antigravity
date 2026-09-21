@@ -24,17 +24,11 @@ import {
   IMAGE_ASPECT_RATIOS,
   parseImageCommandArgs,
 } from "./image/index.js";
-import {
-  ANTIGRAVITY_MODELS,
-  applyDerivedModels,
-  PROVIDER_ID,
-  readCachedModelRows,
-  writeCachedModelRows,
-} from "./models/index.js";
+import { getCurrentAntigravityCatalog, PROVIDER_ID, refreshSlotCatalog } from "./models/index.js";
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
 import {
   fetchAccountUsage,
-  fetchLiveModelRows,
+  fetchLiveModelsRaw,
   formatFooterStatus,
   formatModelsList,
   formatUsageSummary,
@@ -129,44 +123,22 @@ async function refreshFooterUsage(ctx: ExtensionContext): Promise<void> {
   }
 }
 
-/**
- * Live model catalog sync for one account slot: derive unknown model families
- * from the backend `fetchAvailableModels` catalog and return the full list to
- * register. Catalogs are per account (entitlement differs), so each slot reads
- * and writes its own cache file.
- *
- * Framework contract (pi-ai `Provider.refreshModels`): offline phases restore
- * the previously synced catalog from the local cache; the composer publishes
- * truthy return values and skips undefined (no-op). Successful rows persist to
- * the cache so derived models survive restarts and provider re-registration
- * (recompose clears the composer's in-memory list, offline restore refills it).
- *
- * Online failures THROW so the framework records them in the refresh result's
- * errors map (surfaced as a warning by /antigravity.models sync); the in-memory
- * list from the offline restore stays intact — pi-ai's "retain on failure".
- */
-async function refreshLiveModels(
+/** Live catalog refresh for one account slot (see models/discovery.ts). */
+function refreshLiveModels(
   providerId: string,
   context: RefreshModelsContext,
 ): Promise<ProviderModelConfig[]> {
-  if (!context.credential) return undefined as unknown as ProviderModelConfig[];
-  if (!context.allowNetwork) {
-    const cached = readCachedModelRows(providerId);
-    return cached ? applyDerivedModels(cached) : (undefined as unknown as ProviderModelConfig[]);
-  }
-  const credential = context.credential;
-  const apiKey =
-    credential.type === "oauth" ? getApiKey(credential) : (credential.key ?? undefined);
-  if (!apiKey) return undefined as unknown as ProviderModelConfig[];
-  const rows = await fetchLiveModelRows(apiKey);
-  writeCachedModelRows(rows, providerId);
-  return applyDerivedModels(rows);
+  return refreshSlotCatalog(providerId, context, fetchLiveModelsRaw);
 }
 
-async function refreshModelRegistry(ctx: ExtensionContext, providerIds: string[]): Promise<void> {
+async function refreshModelRegistry(
+  ctx: ExtensionContext,
+  providerIds: string[],
+  force = false,
+): Promise<void> {
   if (providerIds.length === 0) return;
   try {
-    const result = await ctx.modelRegistry.refresh({ providers: providerIds });
+    const result = await ctx.modelRegistry.refresh({ providers: providerIds, force });
     for (const providerId of providerIds) {
       const error = result.errors.get(providerId);
       if (error) {
@@ -184,12 +156,11 @@ async function refreshModelRegistry(ctx: ExtensionContext, providerIds: string[]
 }
 
 /**
- * Models to register for a slot: its synced catalog when one was cached,
- * the static baseline otherwise.
+ * Models to register for a slot: its refreshed catalog when one is known, the
+ * static baseline otherwise.
  */
 function slotModels(providerId: string): ProviderModelConfig[] {
-  const cached = readCachedModelRows(providerId);
-  return cached ? applyDerivedModels(cached) : ANTIGRAVITY_MODELS;
+  return getCurrentAntigravityCatalog(providerId).models;
 }
 
 /**
@@ -208,7 +179,10 @@ function slotProviderConfig(pi: ExtensionAPI, slot: AccountSlot): ProviderConfig
     baseUrl: DEFAULT_ENDPOINT,
     api: ANTIGRAVITY_API,
     ...(slot.signedIn ? { models: slotModels(slot.providerId) } : {}),
-    refreshModels: (context: RefreshModelsContext) => refreshLiveModels(slot.providerId, context),
+    // An unsigned slot publishes an empty list: it stays out of `/model` until it has
+    // credentials, and a later `/login` re-registers it with its catalog.
+    refreshModels: (context: RefreshModelsContext) =>
+      slot.signedIn ? refreshLiveModels(slot.providerId, context) : Promise.resolve([]),
     oauth: {
       name: displayName,
       login: (callbacks) => loginSlot(pi, slot.providerId, callbacks),
@@ -388,7 +362,7 @@ export default function (pi: ExtensionAPI): void {
       const all = /\ball\b/i.test(args || "");
       if (/\bsync\b/i.test(args || "")) {
         emitCommandOutput(ctx, "Syncing Antigravity model catalog…", "info");
-        await refreshModelRegistry(ctx, [activeProviderId(ctx)]);
+        await refreshModelRegistry(ctx, [activeProviderId(ctx)], true);
       }
       await withUsage(ctx, (usage) => formatModelsList(usage, { all }));
     },

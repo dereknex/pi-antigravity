@@ -22,7 +22,8 @@ const {
   slotNumber,
   slotProviderId,
 } = await import("../src/accounts/index.js");
-const { catalogCachePath } = await import("../src/models/index.js");
+const { ANTIGRAVITY_MODELS, applyAntigravityCatalog, getCurrentAntigravityCatalog } =
+  await import("../src/models/index.js");
 
 function fail(message: string): never {
   console.error(`FAIL: ${message}`);
@@ -143,13 +144,16 @@ assert.equal(providerDisplayName("antigravity", "a@b.com"), "Antigravity (a@b.co
 assert.equal(providerDisplayName("antigravity-2"), "Antigravity #2");
 assert.equal(providerDisplayName("antigravity-2", "a@b.com"), "Antigravity #2 (a@b.com)");
 
-// 8. Each slot caches its own catalog; slot 1 keeps the legacy filename.
-assert.equal(catalogCachePath(), join(fixtureDir, "antigravity-models-cache.json"));
-assert.equal(catalogCachePath("antigravity"), join(fixtureDir, "antigravity-models-cache.json"));
-assert.equal(
-  catalogCachePath("antigravity-2"),
-  join(fixtureDir, "antigravity-models-cache.antigravity-2.json"),
-  "one account's catalog must not overwrite another's",
+// 8. Each slot keeps its own catalog state keyed by provider id.
+const slotCatalog = { models: [], routing: {} };
+applyAntigravityCatalog("antigravity-2", slotCatalog as never);
+assert.ok(
+  getCurrentAntigravityCatalog("antigravity-2") === slotCatalog,
+  "a slot keeps the catalog written for it",
+);
+assert.ok(
+  getCurrentAntigravityCatalog("antigravity").models === ANTIGRAVITY_MODELS,
+  "one account's catalog must not leak into another's",
 );
 
 console.log("accounts: OK");

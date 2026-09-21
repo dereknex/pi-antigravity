@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   antigravityHeaders,
+  DISCOVERY_TIMEOUT_MS,
   endpointCandidates,
   extractProjectId,
   parseApiKey,
@@ -117,14 +118,17 @@ async function fetchAvailableModelsFromEndpoint(
   endpoint: string,
   token: string,
   projectId: string,
+  signal?: AbortSignal,
 ): Promise<{ endpoint: string; status: number; data: unknown } | undefined> {
   // `{}` and `{ project: projectId }` return byte-identical catalogs on this endpoint
   // (verified against the live backend) — one body is the full search space per host.
+  const timeout = AbortSignal.timeout(DISCOVERY_TIMEOUT_MS);
   try {
     const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
       method: "POST",
       headers: jsonHeaders(token),
       body: JSON.stringify({ project: projectId }),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
     const text = await res.text();
     let data: unknown;
@@ -151,18 +155,10 @@ async function fetchAvailableModelsFromEndpoint(
  * Merge fetchAvailableModels across endpoint candidates so daily/sandbox-only
  * models (e.g. Gemini 3.6 Flash) appear alongside production catalog entries.
  */
-async function fetchMergedAvailableModels(
-  token: string,
-  projectId: string,
-): Promise<{ endpoint: string; status: number; data: AvailableModelsRaw }> {
-  // Both endpoints are always queried to merge their catalogs — fetch them concurrently
-  // instead of blocking on production before starting the daily/sandbox request.
-  const results = await Promise.all(
-    endpointCandidates().map((endpoint) =>
-      fetchAvailableModelsFromEndpoint(endpoint, token, projectId),
-    ),
-  );
-
+/** Merge catalog payloads from one or more fetchAvailableModels responses. */
+export function mergeAvailableModelsResults(
+  results: Array<{ endpoint: string; status: number; data: unknown } | undefined>,
+): { endpoint: string; status: number; data: AvailableModelsRaw } {
   const mergedModels: Record<string, unknown> = {};
   let defaultAgentModelId: string | undefined;
   let lastEndpoint = "";
@@ -177,6 +173,7 @@ async function fetchMergedAvailableModels(
     const data = result.data;
     if (isRecord(data) && isRecord(data.models)) {
       Object.assign(mergedModels, data.models);
+      registerDiscoveredModelEnums(data.models as Record<string, { model?: unknown }>);
     }
     if (isRecord(data) && typeof data.defaultAgentModelId === "string") {
       defaultAgentModelId = data.defaultAgentModelId;
@@ -195,6 +192,21 @@ async function fetchMergedAvailableModels(
       defaultAgentModelId,
     },
   };
+}
+
+async function fetchMergedAvailableModels(
+  token: string,
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<{ endpoint: string; status: number; data: AvailableModelsRaw }> {
+  // Both endpoints are always queried to merge their catalogs — fetch them concurrently
+  // instead of blocking on production before starting the daily/sandbox request.
+  const results = await Promise.all(
+    endpointCandidates().map((endpoint) =>
+      fetchAvailableModelsFromEndpoint(endpoint, token, projectId, signal),
+    ),
+  );
+  return mergeAvailableModelsResults(results);
 }
 
 function parseQuotaSummary(data: unknown): { groups: QuotaGroup[]; description?: string } {
@@ -263,9 +275,6 @@ function parseModels(data: unknown): {
     });
   }
   models.sort((a, b) => a.modelId.localeCompare(b.modelId));
-  // Publish the backend enum ids so the `model_enum` request label can be set for
-  // derived families too (static table only covers the curated catalog).
-  registerDiscoveredModelEnums(modelsObj);
   return {
     models,
     defaultAgentModelId:
@@ -325,11 +334,15 @@ async function fetchQuotaSummarySafe(token: string): Promise<
  * Live runtime catalog rows for model sync (`refreshModels`). Throws on failure —
  * callers fall back to the static catalog.
  */
-export async function fetchLiveModelRows(apiKeyRaw: string): Promise<ModelQuotaRow[]> {
+/** Raw backend catalog for the model-discovery layer (one merged payload). */
+export async function fetchLiveModelsRaw(
+  apiKeyRaw: string,
+  signal?: AbortSignal,
+): Promise<AvailableModelsRaw> {
   const creds = parseApiKey(apiKeyRaw);
   const projectId = resolveProjectId({ token: creds.token, credentialProjectId: creds.projectId });
-  const available = await fetchMergedAvailableModels(creds.token, projectId);
-  return parseModels(available.data).models;
+  const available = await fetchMergedAvailableModels(creds.token, projectId, signal);
+  return available.data;
 }
 
 export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsage> {

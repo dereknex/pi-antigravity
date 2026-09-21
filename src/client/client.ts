@@ -30,7 +30,7 @@ const modelCache = new Map<string, { result: DynamicModelInfo | undefined; expir
 
 /** Metadata lookups (project/model discovery) must be fast; a stalled endpoint should
  * fall through to the next candidate instead of hanging the whole request. */
-const DISCOVERY_TIMEOUT_MS = 8000;
+export const DISCOVERY_TIMEOUT_MS = 8000;
 
 /** In-flight de-dupe: concurrent requests for the same (token, project, model) share one probe. */
 const inFlightModelLookups = new Map<string, Promise<DynamicModelInfo | undefined>>();

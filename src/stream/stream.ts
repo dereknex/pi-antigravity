@@ -1388,9 +1388,12 @@ export function streamAntigravity(
       setLastProjectId(projectId);
 
       const effort = opts.reasoning ?? "off";
-      const isKnownModel = isKnownAntigravityModel(model.id);
+      // Catalog routing is per account slot: a family discovered for one account must
+      // not silently route on another.
+      const isKnownModel = isKnownAntigravityModel(model.id, model.provider);
       const baseRuntimeModel =
-        antigravityEnv("RUNTIME_MODEL")?.trim() || getAntigravityRequestModelId(model.id, effort);
+        antigravityEnv("RUNTIME_MODEL")?.trim() ||
+        getAntigravityRequestModelId(model.id, effort, model.provider);
 
       let initialRuntimeModel = baseRuntimeModel;
       // Skip pre-flight model discovery for known static models to optimize TTFT latency.
