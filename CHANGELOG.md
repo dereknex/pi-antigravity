@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.0
+
+### Minor Changes
+
+- 03ccc0b: Replace the hand-rolled catalog cache with Pi's per-provider model store and adopt upstream's catalog grouping.
+
+  ### Changed
+  - **Catalog engine:** runtime variants are grouped into public model IDs the same way upstream does it — display-name and suffix tier parsing, `-tiered` rollout IDs, and the `gemini-pro-agent` / `gemini-3-flash-agent` aliases — while the curated static catalog keeps its hand-tuned routing.
+  - **Catalog persistence:** each account slot's catalog now lives in Pi's per-provider model store (`~/.pi/agent/models-store.json`) instead of `antigravity-models-cache[.slot].json`, which is deleted on first refresh. Persistence and the in-memory catalog are published together, so an aborted refresh cannot desynchronise them.
+  - **Refresh policy:** a refreshed catalog is reused for 4 hours (`ANTIGRAVITY_CATALOG_REFRESH_INTERVAL_MS`); `/antigravity.models sync` forces a refresh. Stale families are pruned when the backend stops advertising them.
+  - **Model labels:** `model_enum` values learned from discovery are persisted with the catalog, so request labels stay accurate across restarts.
+
+- 5aa4eb5: Merge the upstream 0.7.1–0.7.3 feature set into the multi-account fork.
+
+  ### Added
+  - **Image generation:** `/antigravity.image` and a `generate_image` agent tool, saving to `.pi/generated-images/` (port of upstream `src/image/`).
+  - **Gemini 3.8 Flash:** added to the static catalog with Low/Medium/High routing and a runtime fallback to Gemini 3.7 Flash when the endpoint has not rolled out yet.
+  - **Streaming watchdogs:** a response-header deadline (default 180s) and a mid-body stall deadline (default 120s), configurable via `ANTIGRAVITY_STREAM_HEADER_TIMEOUT_MS` / `ANTIGRAVITY_STREAM_STALL_TIMEOUT_MS`; both accept `0` to disable.
+  - **Tool schema isolation:** unresolved or external `$ref` pointers no longer reject the whole request — the affected tool is dropped and reported in `/antigravity.doctor` as `toolSchemaWarnings`.
+  - **Skill blocks** in user turns are hoisted into `systemInstruction` instead of being replayed as user prose.
+
+  ### Changed
+  - **Wire alignment with the Antigravity CLI:** request labels now carry `request_id`, stable `trajectory_id`, and `used_non_gemini_model`; `toolConfig` is omitted in default (auto) tool mode; thinking is sent as an integer `thinkingBudget` for every model; `model_enum` is learned from `fetchAvailableModels`.
+  - Invalid conversation boundaries are repaired instead of sent: a user bridge is inserted before model function-call turns that lost their boundary in compacted history, and skill-only turns no longer need synthetic user text.
+
+  ### Fixed
+  - Transient 429 `RESOURCE_EXHAUSTED` responses are classified as retryable rate limits, so Pi's automatic retry backoff engages; real quota walls stay non-retryable.
+  - Final assistant tool calls without a tool result no longer break the session: a continuation turn is sent and the event is surfaced via `/antigravity.doctor` as `trailingToolCall`.
+  - Dropped the leftover `anthropic-beta` reasoning header and the legacy `VALIDATED` tool-config injection.
+
+### Patch Changes
+
+- bade0c8: Read the system prompt and tool declarations from the transcript so pi >= 0.86 requests carry instructions and tools again.
+
+  ### Fixed
+  - **Prompt and tools on pi >= 0.86:** pi 0.86 replaced the flat provider `Context` with a normalized `TranscriptContext`, moving the rendered system prompt into system-message `sections` and the tool declarations into `toolsAdded` / `toolsRemoved`. The provider still read `context.systemPrompt` and `context.tools`, which are absent there, so every Antigravity turn went out with only the base Antigravity instructions and **no tools at all** — models hallucinated function calls and the backend answered `MALFORMED_FUNCTION_CALL`. `resolveCurrentSystemPrompt()` / `resolveCurrentTools()` now prefer pi-ai's `getCurrentSystemPrompt()` / `getCurrentTools()` helpers and fall back to replaying the transcript deltas themselves, with the flat fields kept as the pre-0.86 path.
+  - Regression coverage in `scripts/test-transcript-context.ts` for section patching, `null` section removal, `toolsRemoved`, and the legacy flat `Context`.
+
 ## 0.7.0
 
 ### Minor Changes
